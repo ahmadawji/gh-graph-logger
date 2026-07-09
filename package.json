@@ -1,0 +1,15 @@
+{
+  "name": "gh-graph-logger",
+  "version": "1.0.0",
+  "description": "A zero-dependency CLI that syncs private commits to a public GitHub contribution graph log.",
+  "bin": {
+    "gh-graph-logger": "./index.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
