@@ -31,8 +31,8 @@ def test_git_error_on_bad_command() -> None:
 
     err = exc_info.value
     assert err.returncode is not None and err.returncode != 0
-    assert err.cmd[0] == "git"
-    assert "not-a-valid-git-subcommand-xyz" in err.cmd
+    assert err.command_args[0] == "git"
+    assert "not-a-valid-git-subcommand-xyz" in err.command_args
     assert err.stderr != ""
     assert str(err) != ""
 

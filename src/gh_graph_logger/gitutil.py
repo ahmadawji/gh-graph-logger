@@ -13,13 +13,13 @@ class GitError(Exception):
     def __init__(
         self,
         message: str,
-        cmd: list[str] | None = None,
+        command_args: list[str] | None = None,
         returncode: int | None = None,
         stderr: str = "",
     ) -> None:
         super().__init__(message)
         self.message: str = message
-        self.cmd: list[str] = list(cmd) if cmd is not None else []
+        self.command_args: list[str] = list(command_args) if command_args is not None else []
         self.returncode: int | None = returncode
         self.stderr: str = stderr
 
@@ -33,9 +33,9 @@ class GitNotFoundError(GitError):
     def __init__(
         self,
         message: str = "git executable not found on system PATH",
-        cmd: list[str] | None = None,
+        command_args: list[str] | None = None,
     ) -> None:
-        super().__init__(message=message, cmd=cmd, returncode=None, stderr="")
+        super().__init__(message=message, command_args=command_args, returncode=None, stderr="")
 
 
 def run_git(
@@ -81,14 +81,14 @@ def run_git(
     except FileNotFoundError as exc:
         raise GitNotFoundError(
             message=f"git executable not found: {cmd[0]}",
-            cmd=cmd,
+            command_args=cmd,
         ) from exc
     except subprocess.TimeoutExpired as exc:
         stderr_bytes = exc.stderr if isinstance(exc.stderr, bytes) else b""
         stderr_str = stderr_bytes.decode("utf-8", errors="replace")
         raise GitError(
             message=f"git command timed out after {timeout}s: {' '.join(cmd)}",
-            cmd=cmd,
+            command_args=cmd,
             returncode=None,
             stderr=stderr_str,
         ) from exc
@@ -100,7 +100,7 @@ def run_git(
         err_msg = stderr_str.strip() or stdout_str.strip() or f"exit code {proc.returncode}"
         raise GitError(
             message=f"git command failed ({' '.join(cmd)}): {err_msg}",
-            cmd=cmd,
+            command_args=cmd,
             returncode=proc.returncode,
             stderr=stderr_str,
         )
