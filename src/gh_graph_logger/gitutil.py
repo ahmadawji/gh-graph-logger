@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -12,13 +13,13 @@ class GitError(Exception):
     def __init__(
         self,
         message: str,
-        args: list[str] | None = None,
+        cmd: list[str] | None = None,
         returncode: int | None = None,
         stderr: str = "",
     ) -> None:
         super().__init__(message)
         self.message: str = message
-        self.args: list[str] = list(args) if args is not None else []
+        self.cmd: list[str] = list(cmd) if cmd is not None else []
         self.returncode: int | None = returncode
         self.stderr: str = stderr
 
@@ -32,22 +33,25 @@ class GitNotFoundError(GitError):
     def __init__(
         self,
         message: str = "git executable not found on system PATH",
-        args: list[str] | None = None,
+        cmd: list[str] | None = None,
     ) -> None:
-        super().__init__(message=message, args=args, returncode=None, stderr="")
+        super().__init__(message=message, cmd=cmd, returncode=None, stderr="")
 
 
 def run_git(
     args: list[str],
     cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
     timeout: float | None = 30,
     check: bool = True,
 ) -> str:
     """Execute a git command safely and return its decoded stdout.
 
     Args:
-        args: Command arguments for git (e.g. ['status'] or ['git', 'status']).
+        args: Command arguments for git (e.g. ['status'] or ['commit', '-m', 'msg']).
+              Do not include the leading 'git' command name.
         cwd: Working directory in which to execute the command.
+        env: Optional environment variables to merge with os.environ.
         timeout: Maximum execution time in seconds. Defaults to 30.
         check: If True, raise GitError on non-zero return codes.
 
@@ -58,14 +62,18 @@ def run_git(
         GitNotFoundError: If git binary is missing from PATH.
         GitError: If command times out or returns non-zero when check=True.
     """
-    cmd: list[str] = list(args)
-    if not cmd or cmd[0] != "git":
-        cmd = ["git"] + cmd
+    cmd: list[str] = ["git", *args]
+
+    proc_env = None
+    if env is not None:
+        proc_env = os.environ.copy()
+        proc_env.update(env)
 
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(cwd) if cwd is not None else None,
+            env=proc_env,
             capture_output=True,
             timeout=timeout,
             shell=False,
@@ -73,14 +81,14 @@ def run_git(
     except FileNotFoundError as exc:
         raise GitNotFoundError(
             message=f"git executable not found: {cmd[0]}",
-            args=cmd,
+            cmd=cmd,
         ) from exc
     except subprocess.TimeoutExpired as exc:
         stderr_bytes = exc.stderr if isinstance(exc.stderr, bytes) else b""
         stderr_str = stderr_bytes.decode("utf-8", errors="replace")
         raise GitError(
             message=f"git command timed out after {timeout}s: {' '.join(cmd)}",
-            args=cmd,
+            cmd=cmd,
             returncode=None,
             stderr=stderr_str,
         ) from exc
@@ -92,7 +100,7 @@ def run_git(
         err_msg = stderr_str.strip() or stdout_str.strip() or f"exit code {proc.returncode}"
         raise GitError(
             message=f"git command failed ({' '.join(cmd)}): {err_msg}",
-            args=cmd,
+            cmd=cmd,
             returncode=proc.returncode,
             stderr=stderr_str,
         )

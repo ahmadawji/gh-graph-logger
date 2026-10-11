@@ -31,8 +31,8 @@ def test_git_error_on_bad_command() -> None:
 
     err = exc_info.value
     assert err.returncode is not None and err.returncode != 0
-    assert err.args[0] == "git"
-    assert "not-a-valid-git-subcommand-xyz" in err.args
+    assert err.cmd[0] == "git"
+    assert "not-a-valid-git-subcommand-xyz" in err.cmd
     assert err.stderr != ""
     assert str(err) != ""
 
@@ -91,3 +91,24 @@ def test_timeout_raises_git_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "timed out after 5" in str(err)
     assert err.returncode is None
     assert "Command timed out" in err.stderr
+
+
+def test_custom_env_passed_to_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_git merges and passes custom environment variables."""
+    captured_kwargs: dict[str, object] = {}
+
+    def mock_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured_kwargs.update(kwargs)
+        return subprocess.CompletedProcess(
+            args=["git", "version"],
+            returncode=0,
+            stdout=b"git version 2.40\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    run_git(["version"], env={"TEST_CUSTOM_GIT_VAR": "custom_val"})
+
+    env_used = captured_kwargs.get("env")
+    assert isinstance(env_used, dict)
+    assert env_used.get("TEST_CUSTOM_GIT_VAR") == "custom_val"

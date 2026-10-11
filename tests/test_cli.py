@@ -18,8 +18,8 @@ def test_exit_code_constants() -> None:
     """Ensure standard exit codes are defined."""
     assert OK == 0
     assert ERROR == 1
-    assert GUARD_FAILED == 2
-    assert ABORTED == 3
+    assert GUARD_FAILED == 3
+    assert ABORTED == 4
 
 
 def test_no_subcommand_prints_help_and_returns_error(capsys: pytest.CaptureFixture[str]) -> None:

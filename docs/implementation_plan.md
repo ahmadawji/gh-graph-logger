@@ -94,7 +94,7 @@ flowchart LR
 | `ghlog discard` | Deletes the draft |
 | `ghlog config --show` | Prints the config |
 
-Exit codes: `0` ok, `1` error, `2` a check failed, `3` aborted by you.
+Exit codes: `0` ok, `1` error, `2` usage error (argparse), `3` a check failed, `4` aborted by you.
 
 ---
 

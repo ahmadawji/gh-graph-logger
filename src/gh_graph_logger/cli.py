@@ -11,8 +11,9 @@ from gh_graph_logger import __version__
 # Exit code constants
 OK: int = 0
 ERROR: int = 1
-GUARD_FAILED: int = 2
-ABORTED: int = 3
+# Note: Exit code 2 is reserved by argparse for CLI usage errors.
+GUARD_FAILED: int = 3
+ABORTED: int = 4
 
 
 def _stub(args: argparse.Namespace) -> int:
@@ -25,7 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
     """Build and configure the top-level argument parser."""
     parser = argparse.ArgumentParser(
         prog="ghlog",
-        description="Log your daily commits to a private GitHub repo.",
+        description=(
+            "Log your daily commits to your GitHub log repository to keep your "
+            "contribution graph active."
+        ),
     )
     parser.add_argument(
         "--version",
