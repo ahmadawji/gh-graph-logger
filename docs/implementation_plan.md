@@ -87,7 +87,7 @@ flowchart LR
 
 | Command | Purpose |
 |---|---|
-| `ghlog init [--root DIR] [--path P] [--reclone]` | Asks for the log repo URL, the **root directory** (default `~/.gh-graph-logger`) and your GitHub email, then clones into `<root>/<repo>`. `--root` creates a new clone under DIR. `--path` points the config to an existing clone that was moved |
+| `ghlog init [--root DIR] [--path P] [--reclone] [--url URL] [--email EMAIL] [--branch BRANCH] [--name NAME] [--yes]` | Configures the log repository. Prompts for URL, root directory (default `~/.gh-graph-logger`), and GitHub email if not passed via `--url`, `--root`, `--email`. `--root` clones under DIR; `--path` adopts an existing moved clone; `--reclone` deletes and re-clones fresh; `--yes` accepts defaults and auto-creates root. |
 | `ghlog check` | Shows ✅ or ❌ for git, inside a repo, the log repo clone, and remote access (`git ls-remote`) |
 | `ghlog collect [--since] [--author] [--full] [--project]` | Runs the checks, opens the draft in the editor, then asks for confirmation and pushes |
 | `ghlog push [--yes]` | Pushes an existing draft, with a confirmation prompt. Also retries log commits that weren't pushed |
@@ -130,11 +130,11 @@ Runs ruff and pytest on {Windows, macOS, Linux} × Python 3.10–3.14.
 ### Phase 2: Checks and global config
 **Goal:** `ghlog init`, `ghlog check` and `ghlog config --show` work.
 #### [NEW] config.py
-Reads and writes `~/.gh-graph-logger/config.toml`: repo URL, clone path, branch, GitHub email, and last push time per project. Uses `tomllib` to read and a small built-in writer to save.
+Reads and writes `~/.gh-graph-logger/config.toml` (or `$GHLOG_HOME/config.toml`): repo URL, clone path, branch, GitHub email, and last push time per project. Uses standard library `tomllib` on Python 3.11+ and a lightweight zero-dependency parser fallback on Python 3.10; writes atomically via a built-in serializer.
 #### [NEW] guards.py
 `require_git()`, `require_git_repo()`, `require_log_repo()` (the clone checks from point 1) and `require_remote_access()` (`git ls-remote` with a timeout).
 #### [MODIFY] cli.py
-Implements `init` (prompts, choosing the root directory with `--root`, cloning, setting the local identity, `--path`, `--reclone`), `check` and `config`.
+Implements `init` (prompts, choosing the root directory with `--root`, cloning, setting the local identity, `--path`, `--reclone`, plus non-interactive testability flags `--url`, `--email`, `--branch`, `--name`, `--yes`), `check` and `config --show`.
 
 **Done when:** tests pass for a missing repo, a moved clone, a mismatched URL, an unreachable remote, a custom `--root`, a root that doesn't exist yet, and a root that is inside a work repo.
 
