@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from gh_graph_logger.config import Config
@@ -69,9 +68,13 @@ def normalize_repo_url(repository_url: str) -> str:
         cleaned_url = "https://github.com/" + cleaned_url[len("https://github.com/") :].lower()
 
     # If it is a Windows path with a drive letter, normalize drive letter casing
-    drive, path_remainder = os.path.splitdrive(cleaned_url)
-    if drive:
-        cleaned_url = drive.lower() + path_remainder
+    if (
+        len(cleaned_url) >= 2
+        and cleaned_url[0].isascii()
+        and cleaned_url[0].isalpha()
+        and cleaned_url[1] == ":"
+    ):
+        cleaned_url = cleaned_url[0].lower() + cleaned_url[1:]
 
     return cleaned_url
 

@@ -24,7 +24,10 @@ def test_normalize_repo_url() -> None:
     assert normalize_repo_url("https://github.com/org/repo.git/") == "https://github.com/org/repo"
     assert normalize_repo_url("https://github.com/org/repo/") == "https://github.com/org/repo"
     assert normalize_repo_url("file:///c:/logs/repo.git") == "c:/logs/repo"
+    assert normalize_repo_url("file:///C:/logs/repo.git") == "c:/logs/repo"
     assert normalize_repo_url("C:\\logs\\repo.git\\") == "c:/logs/repo"
+    assert normalize_repo_url("D:\\Logs\\MyRepo.git\\") == "d:/Logs/MyRepo"
+    assert normalize_repo_url("/var/Logs/MyRepo.git/") == "/var/Logs/MyRepo"
 
     # GitHub SSH vs HTTPS equivalence (case-insensitive)
     ssh_url = "git@github.com:MyOrg/MyRepo.git"
