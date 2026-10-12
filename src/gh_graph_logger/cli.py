@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -93,15 +92,93 @@ def repo_name_from_url(repository_url: str) -> str:
     return extracted_name.strip()
 
 
-def _handle_remove_readonly(action: Any, file_path: str, exception_info: Any) -> None:
-    """Error handler for shutil.rmtree to remove read-only attributes on Windows."""
-    import stat
+def _resolve_and_validate_email(
+    arguments: argparse.Namespace,
+    existing_configuration: Config | None,
+) -> str:
+    """Prompt for, validate, and return the GitHub email address for log commits."""
+    github_email = arguments.email
+    if not github_email:
+        default_email = existing_configuration.github_email if existing_configuration else None
+        if not arguments.yes:
+            github_email = prompt("GitHub email for log commits", default=default_email)
+        elif default_email:
+            github_email = default_email
+
+    if not github_email or "@" not in github_email:
+        raise GuardError(
+            "GitHub email must contain '@'.",
+            hint="Provide a valid GitHub email address.",
+        )
+
+    safe_print(
+        f"Warning: Ensure '{github_email}' is verified on your GitHub account "
+        "for contributions to count."
+    )
+    return github_email
+
+
+def _configure_clone_identity(
+    clone_path: Path,
+    github_email: str,
+    arguments: argparse.Namespace,
+) -> None:
+    """Set user.email and optionally user.name in the log repository clone."""
+    run_git(["config", "user.email", github_email], cwd=clone_path)
+
+    if arguments.name:
+        run_git(["config", "user.name", arguments.name], cwd=clone_path)
+    elif not arguments.yes:
+        try:
+            global_user_name = run_git(["config", "--global", "user.name"]).strip()
+        except GitError:
+            global_user_name = ""
+        chosen_user_name = prompt(
+            "Git user name for log commits", default=global_user_name or None
+        )
+        if chosen_user_name:
+            run_git(["config", "user.name", chosen_user_name], cwd=clone_path)
+    else:
+        try:
+            global_user_name = run_git(["config", "--global", "user.name"]).strip()
+            if global_user_name:
+                run_git(["config", "user.name", global_user_name], cwd=clone_path)
+        except GitError:
+            pass
+
+
+def _resolve_branch_name(
+    clone_path: Path,
+    specified_branch: str | None,
+    existing_configuration: Config | None,
+) -> str:
+    """Detect or fallback the target branch name for the log repository."""
+    if specified_branch:
+        return specified_branch
 
     try:
-        os.chmod(file_path, stat.S_IWRITE)
-        action(file_path)
-    except Exception:
+        symbolic_reference = run_git(
+            ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            cwd=clone_path,
+        ).strip()
+        if symbolic_reference.startswith("origin/"):
+            return symbolic_reference[7:]
+        if symbolic_reference:
+            return symbolic_reference
+    except GitError:
         pass
+
+    try:
+        current_branch = run_git(["branch", "--show-current"], cwd=clone_path).strip()
+        if current_branch:
+            return current_branch
+    except GitError:
+        pass
+
+    if existing_configuration and existing_configuration.branch:
+        return existing_configuration.branch
+
+    return "main"
 
 
 def _stub(arguments: argparse.Namespace) -> int:
@@ -112,13 +189,14 @@ def _stub(arguments: argparse.Namespace) -> int:
 
 def handle_init(arguments: argparse.Namespace) -> int:
     """Initialize or configure the log repository clone."""
+    existing_configuration = load_config()
+
     # Flow A: Adopting an existing clone via --path
     if arguments.path:
         specified_clone_path = Path(
             os.path.expandvars(os.path.expanduser(arguments.path))
         ).resolve()
 
-        existing_configuration = load_config()
         repository_url = arguments.url
         if not repository_url:
             if existing_configuration:
@@ -130,7 +208,14 @@ def handle_init(arguments: argparse.Namespace) -> int:
             safe_print("Error: Log repository URL is required.", file=sys.stderr)
             return ERROR
 
-        require_remote_access(repository_url)
+        # Warn if remote access fails rather than blocking offline adoption
+        try:
+            require_remote_access(repository_url)
+        except GuardError as exception:
+            safe_print(
+                f"Warning: Could not verify remote access ({exception.message}). "
+                "Proceeding with local adoption."
+            )
 
         if not specified_clone_path.exists():
             safe_print(
@@ -168,39 +253,11 @@ def handle_init(arguments: argparse.Namespace) -> int:
             )
             return ERROR
 
-        github_email = arguments.email
-        if not github_email:
-            default_email = existing_configuration.github_email if existing_configuration else None
-            if not arguments.yes:
-                github_email = prompt("GitHub email for log commits", default=default_email)
-            elif default_email:
-                github_email = default_email
-
-        if not github_email or "@" not in github_email:
-            raise GuardError(
-                "GitHub email must contain '@'.",
-                hint="Provide a valid GitHub email address.",
-            )
-
-        safe_print(
-            f"Warning: Ensure '{github_email}' is verified on your GitHub account "
-            "for contributions to count."
+        github_email = _resolve_and_validate_email(arguments, existing_configuration)
+        _configure_clone_identity(specified_clone_path, github_email, arguments)
+        branch_name = _resolve_branch_name(
+            specified_clone_path, arguments.branch, existing_configuration
         )
-
-        branch_name = arguments.branch
-        if not branch_name:
-            try:
-                branch_name = run_git(
-                    ["branch", "--show-current"], cwd=specified_clone_path
-                ).strip()
-            except GitError:
-                branch_name = ""
-            if not branch_name:
-                branch_name = existing_configuration.branch if existing_configuration else "main"
-
-        run_git(["config", "user.email", github_email], cwd=specified_clone_path)
-        if arguments.name:
-            run_git(["config", "user.name", arguments.name], cwd=specified_clone_path)
 
         new_configuration = Config(
             log_repo_url=repository_url,
@@ -215,8 +272,7 @@ def handle_init(arguments: argparse.Namespace) -> int:
         )
         return OK
 
-    # Flow B: Normal init or --root or --reclone
-    existing_configuration = load_config()
+    # Flow B: Normal init or --root (Strictly non-destructive)
     repository_url = arguments.url
     if not repository_url:
         default_url = existing_configuration.log_repo_url if existing_configuration else None
@@ -229,7 +285,8 @@ def handle_init(arguments: argparse.Namespace) -> int:
         safe_print("Error: Log repository URL is required.", file=sys.stderr)
         return ERROR
 
-    # Verify remote access before creating directories
+    # Validate repository URL syntax and verify remote access
+    normalize_repo_url(repository_url)
     require_remote_access(repository_url)
 
     # Determine root directory
@@ -237,7 +294,9 @@ def handle_init(arguments: argparse.Namespace) -> int:
     if arguments.root:
         root_input = arguments.root
     elif not arguments.yes:
-        root_input = prompt("Root directory for the log repo", default=str(default_root_directory))
+        root_input = prompt(
+            "Root directory for the log repo", default=str(default_root_directory)
+        )
     else:
         root_input = str(default_root_directory)
 
@@ -256,7 +315,7 @@ def handle_init(arguments: argparse.Namespace) -> int:
             raise GuardError(
                 f"Root directory '{root_directory}' is inside a git repository "
                 f"({work_tree_top_level}).",
-                hint="Choose a root directory outside of any git repository.",
+                hint="Choose a root directory outside of any git repository using '--root <dir>'.",
             )
         except GitError:
             pass
@@ -279,133 +338,45 @@ def handle_init(arguments: argparse.Namespace) -> int:
 
     target_clone_path = (root_directory / repository_folder_name).resolve()
 
-    # Handle existing target directory
+    # Handle existing target directory (Strictly non-destructive)
     if target_clone_path.exists():
-        if arguments.reclone:
-            has_unpushed_commits = False
-            if (target_clone_path / ".git").exists():
-                try:
-                    unpushed_count_output = run_git(
-                        ["rev-list", "--count", "@{u}..HEAD"], cwd=target_clone_path
-                    ).strip()
-                    if unpushed_count_output and int(unpushed_count_output) > 0:
-                        has_unpushed_commits = True
-                except GitError:
-                    has_unpushed_commits = True
-
-            if has_unpushed_commits:
-                safe_print(
-                    f"Warning: Existing clone at '{target_clone_path}' has unpushed "
-                    "commits that will be lost.",
-                    file=sys.stderr,
-                )
-                if not arguments.yes:
-                    confirmation = prompt(
-                        "Re-cloning will delete all unpushed commits. "
-                        "Are you sure you want to proceed? [y/N]",
-                        default="n",
-                    )
-                    if confirmation.lower() not in ("y", "yes"):
-                        safe_print("Operation aborted by user.", file=sys.stderr)
-                        return ABORTED
-
-            shutil.rmtree(target_clone_path, onerror=_handle_remove_readonly)
-        else:
+        is_matching_clone = False
+        try:
+            target_top_level = Path(
+                run_git(["rev-parse", "--show-toplevel"], cwd=target_clone_path)
+            ).resolve()
+            if target_top_level == target_clone_path:
+                origin_remote_url = run_git(
+                    ["remote", "get-url", "origin"], cwd=target_clone_path
+                ).strip()
+                if normalize_repo_url(origin_remote_url) == normalize_repo_url(repository_url):
+                    is_matching_clone = True
+        except GitError:
             is_matching_clone = False
-            try:
-                target_top_level = Path(
-                    run_git(["rev-parse", "--show-toplevel"], cwd=target_clone_path)
-                ).resolve()
-                if target_top_level == target_clone_path:
-                    origin_remote_url = run_git(
-                        ["remote", "get-url", "origin"], cwd=target_clone_path
-                    ).strip()
-                    if normalize_repo_url(origin_remote_url) == normalize_repo_url(repository_url):
-                        is_matching_clone = True
-            except GitError:
-                is_matching_clone = False
 
-            if is_matching_clone:
-                safe_print(f"Reusing existing clone at '{target_clone_path}'.")
-            else:
-                safe_print(
-                    f"Error: Directory '{target_clone_path}' already exists and "
-                    f"is not a clone of '{repository_url}'.",
-                    file=sys.stderr,
-                )
-                return ERROR
-
-    # Clone repository if target does not exist
-    if not target_clone_path.exists():
+        if is_matching_clone:
+            safe_print(f"Reusing existing clone at '{target_clone_path}'.")
+        else:
+            safe_print(
+                f"Error: Directory '{target_clone_path}' already exists and "
+                f"is not a clone of '{repository_url}'.",
+                file=sys.stderr,
+            )
+            return ERROR
+    else:
         safe_print(f"Cloning {repository_url} into {target_clone_path}...")
         run_git(
-            ["clone", repository_url, str(target_clone_path)],
+            ["clone", "--", repository_url, str(target_clone_path)],
             env={"GIT_TERMINAL_PROMPT": "0"},
             timeout=300,
         )
 
-    # Detect branch
-    branch_name = arguments.branch
-    if not branch_name:
-        try:
-            symbolic_reference = run_git(
-                ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-                cwd=target_clone_path,
-            ).strip()
-            if symbolic_reference.startswith("origin/"):
-                branch_name = symbolic_reference[7:]
-            else:
-                branch_name = symbolic_reference
-        except GitError:
-            try:
-                branch_name = run_git(["branch", "--show-current"], cwd=target_clone_path).strip()
-            except GitError:
-                branch_name = ""
-        if not branch_name:
-            branch_name = "main"
-
-    # Determine email
-    github_email = arguments.email
-    if not github_email:
-        default_email = existing_configuration.github_email if existing_configuration else None
-        if not arguments.yes:
-            github_email = prompt("GitHub email for log commits", default=default_email)
-        elif default_email:
-            github_email = default_email
-
-    if not github_email or "@" not in github_email:
-        raise GuardError(
-            "GitHub email must contain '@'.",
-            hint="Provide a valid GitHub email address.",
-        )
-
-    safe_print(
-        f"Warning: Ensure '{github_email}' is verified on your GitHub account "
-        "for contributions to count."
+    github_email = _resolve_and_validate_email(arguments, existing_configuration)
+    _configure_clone_identity(target_clone_path, github_email, arguments)
+    branch_name = _resolve_branch_name(
+        target_clone_path, arguments.branch, existing_configuration
     )
 
-    # Configure git identity in log repo clone
-    run_git(["config", "user.email", github_email], cwd=target_clone_path)
-
-    if arguments.name:
-        run_git(["config", "user.name", arguments.name], cwd=target_clone_path)
-    elif not arguments.yes:
-        try:
-            global_user_name = run_git(["config", "--global", "user.name"]).strip()
-        except GitError:
-            global_user_name = ""
-        chosen_user_name = prompt("Git user name for log commits", default=global_user_name or None)
-        if chosen_user_name:
-            run_git(["config", "user.name", chosen_user_name], cwd=target_clone_path)
-    else:
-        try:
-            global_user_name = run_git(["config", "--global", "user.name"]).strip()
-            if global_user_name:
-                run_git(["config", "user.name", global_user_name], cwd=target_clone_path)
-        except GitError:
-            pass
-
-    # Save configuration
     new_configuration = Config(
         log_repo_url=repository_url,
         clone_path=str(target_clone_path),
@@ -414,7 +385,9 @@ def handle_init(arguments: argparse.Namespace) -> int:
         last_push=(existing_configuration.last_push if existing_configuration else {}),
     )
     save_config(new_configuration)
-    safe_print(f"{format_status(True)} Successfully initialized log repo at '{target_clone_path}'.")
+    safe_print(
+        f"{format_status(True)} Successfully initialized log repo at '{target_clone_path}'."
+    )
     return OK
 
 
@@ -542,9 +515,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser_init.add_argument("--root", type=str, help="Root directory for the log repo")
     parser_init.add_argument("--path", type=str, help="Path to an existing log repo clone")
-    parser_init.add_argument(
-        "--reclone", action="store_true", help="Re-clone the log repo from scratch"
-    )
     parser_init.add_argument("--url", type=str, help="Git URL of the log repository")
     parser_init.add_argument("--email", type=str, help="GitHub email for log commits")
     parser_init.add_argument(

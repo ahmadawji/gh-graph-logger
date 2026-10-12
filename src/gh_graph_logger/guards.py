@@ -27,9 +27,16 @@ def normalize_repo_url(repository_url: str) -> str:
     """Normalize a git repository URL or local file path for reliable comparison.
 
     Strips leading/trailing whitespace, trailing slashes, trailing '.git', and standardizes
-    path separators and Windows drive letter casing.
+    path separators, Windows drive letter casing, and GitHub SSH vs HTTPS representations.
     """
     cleaned_url = repository_url.strip()
+
+    # Reject dangerous URLs starting with hyphen to prevent argument injection
+    if cleaned_url.startswith("-"):
+        raise GuardError(
+            f"Invalid repository URL '{repository_url}': URLs starting with '-' are not permitted.",
+            hint="Provide a valid git URL or local path.",
+        )
 
     # Strip file URL prefixes if present
     if cleaned_url.startswith("file:///"):
@@ -41,9 +48,25 @@ def normalize_repo_url(repository_url: str) -> str:
     cleaned_url = cleaned_url.replace("\\", "/")
     cleaned_url = cleaned_url.rstrip("/")
 
-    # Normalize trailing '.git'
-    if cleaned_url.endswith(".git"):
+    # Normalize trailing '.git' (case-insensitive)
+    if cleaned_url.lower().endswith(".git"):
         cleaned_url = cleaned_url[:-4].rstrip("/")
+
+    # Normalize GitHub SSH vs HTTPS URLs:
+    # e.g. git@github.com:owner/repo -> https://github.com/owner/repo
+    # e.g. ssh://git@github.com/owner/repo -> https://github.com/owner/repo
+    ssh_prefix_1 = "git@github.com:"
+    ssh_prefix_2 = "ssh://git@github.com/"
+    if cleaned_url.lower().startswith(ssh_prefix_1.lower()):
+        cleaned_url = "https://github.com/" + cleaned_url[len(ssh_prefix_1) :]
+    elif cleaned_url.lower().startswith(ssh_prefix_2.lower()):
+        cleaned_url = "https://github.com/" + cleaned_url[len(ssh_prefix_2) :]
+    elif cleaned_url.lower().startswith("http://github.com/"):
+        cleaned_url = "https://github.com/" + cleaned_url[len("http://github.com/") :]
+
+    # If it is a github.com URL, lower-case for case-insensitive comparison
+    if cleaned_url.lower().startswith("https://github.com/"):
+        cleaned_url = "https://github.com/" + cleaned_url[len("https://github.com/") :].lower()
 
     # If it is a Windows path with a drive letter, normalize drive letter casing
     drive, path_remainder = os.path.splitdrive(cleaned_url)
@@ -112,13 +135,13 @@ def require_log_repo(config: Config) -> Path:
     if not clone_path.exists():
         raise GuardError(
             f"Log repo not found at '{config.clone_path}'.",
-            hint="Run `ghlog init --path <new>` or `ghlog init --reclone`.",
+            hint="Run `ghlog init --path <new>` or run `ghlog init` to reconfigure.",
         )
 
     if not clone_path.is_dir():
         raise GuardError(
             f"Log repo path '{config.clone_path}' is not a directory.",
-            hint="Run `ghlog init --path <new>` or `ghlog init --reclone`.",
+            hint="Run `ghlog init --path <new>` or run `ghlog init` to reconfigure.",
         )
 
     try:
@@ -126,14 +149,14 @@ def require_log_repo(config: Config) -> Path:
     except GitError as exception:
         raise GuardError(
             f"Log repo clone at '{config.clone_path}' is not a git repository.",
-            hint="Run `ghlog init --path <new>` or `ghlog init --reclone`.",
+            hint="Run `ghlog init --path <new>` or run `ghlog init` to reconfigure.",
         ) from exception
 
     if top_level != clone_path:
         raise GuardError(
             f"Log repo clone at '{config.clone_path}' is not the root of a git repository "
             f"(found {top_level}).",
-            hint="Run `ghlog init --path <new>` or `ghlog init --reclone`.",
+            hint="Run `ghlog init --path <new>` or run `ghlog init` to reconfigure.",
         )
 
     try:
@@ -141,7 +164,7 @@ def require_log_repo(config: Config) -> Path:
     except GitError as exception:
         raise GuardError(
             f"Log repo clone at '{config.clone_path}' has no remote 'origin'.",
-            hint="Run `ghlog init --reclone` or configure remote 'origin'.",
+            hint="Run `ghlog init` to reconfigure or configure remote 'origin'.",
         ) from exception
 
     if normalize_repo_url(origin_url) != normalize_repo_url(config.log_repo_url):

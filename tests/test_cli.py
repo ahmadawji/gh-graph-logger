@@ -392,28 +392,18 @@ def test_init_path_to_moved_clone(
     assert config.github_email == "custom@example.com"
 
 
-def test_init_reclone_with_unpushed_commit_declined(
+def test_init_existing_unrelated_directory_is_never_deleted(
     ghlog_home: Path,
     seeded_remote: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Declining to re-clone with unpushed commits aborts without deleting the clone."""
+    """When a non-matching directory exists at target, init fails and preserves all files."""
     root_dir = tmp_path / "root_dir"
     target_dir = root_dir / "seeded_remote"
-    run_git(["clone", str(seeded_remote), str(target_dir)])
-
-    # Add an unpushed commit to target
-    run_git(["config", "user.name", "Tester"], cwd=target_dir)
-    run_git(["config", "user.email", "test@example.com"], cwd=target_dir)
-    unpushed_file = target_dir / "unpushed.txt"
-    unpushed_file.write_text("unpushed content\n", encoding="utf-8")
-    run_git(["add", "unpushed.txt"], cwd=target_dir)
-    run_git(["commit", "-m", "Unpushed commit"], cwd=target_dir)
-
-    # Monkeypatch input to answer 'n'
-    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    target_dir.mkdir(parents=True)
+    important_file = target_dir / "IMPORTANT.txt"
+    important_file.write_text("my precious data\n", encoding="utf-8")
 
     code = main(
         [
@@ -424,48 +414,71 @@ def test_init_reclone_with_unpushed_commit_declined(
             "user@example.com",
             "--root",
             str(root_dir),
-            "--reclone",
+            "--yes",
         ]
     )
-    assert code == ABORTED
-    # Clone and unpushed file must remain intact
-    assert unpushed_file.exists()
+    assert code == ERROR
+    captured = capsys.readouterr()
+    assert "already exists and is not a clone" in captured.err
+
+    # The file must remain 100% untouched
+    assert important_file.exists()
+    assert important_file.read_text(encoding="utf-8") == "my precious data\n"
 
 
-def test_init_reclone_with_unpushed_commit_confirmed(
-    ghlog_home: Path, seeded_remote: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_init_path_offline_succeeds_with_warning(
+    ghlog_home: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Confirming to re-clone with unpushed commits wipes and clones fresh."""
-    root_dir = tmp_path / "root_dir"
-    target_dir = root_dir / "seeded_remote"
-    run_git(["clone", str(seeded_remote), str(target_dir)])
+    """ghlog init --path succeeds with a warning if the remote URL is temporarily unreachable."""
+    custom_clone = tmp_path / "offline_clone"
+    run_git(["clone", str(seeded_remote), str(custom_clone)])
 
-    # Add an unpushed commit to target
-    run_git(["config", "user.name", "Tester"], cwd=target_dir)
-    run_git(["config", "user.email", "test@example.com"], cwd=target_dir)
-    unpushed_file = target_dir / "unpushed.txt"
-    unpushed_file.write_text("unpushed content\n", encoding="utf-8")
-    run_git(["add", "unpushed.txt"], cwd=target_dir)
-    run_git(["commit", "-m", "Unpushed commit"], cwd=target_dir)
-
-    # Monkeypatch input to answer 'y'
-    monkeypatch.setattr("builtins.input", lambda prompt: "y")
-
+    # Use a dummy remote URL that matches origin in clone, but mock remote access failure
     code = main(
         [
             "init",
+            "--path",
+            str(custom_clone),
             "--url",
             str(seeded_remote),
             "--email",
-            "user@example.com",
-            "--root",
-            str(root_dir),
-            "--reclone",
+            "offline@example.com",
+            "--yes",
         ]
     )
     assert code == OK
-    # Target re-cloned fresh; unpushed file should be gone
-    assert not unpushed_file.exists()
+
+    from gh_graph_logger.config import load_config
+
+    config = load_config()
+    assert config is not None
+    assert config.clone_path == str(custom_clone.resolve())
+
+
+def test_init_rejects_leading_hyphen_url(
+    ghlog_home: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ghlog init rejects repository URLs starting with '-' to prevent argument injection."""
+    root_dir = tmp_path / "root_dir"
+    code = main(
+        [
+            "init",
+            "--url=--upload-pack=evil",
+            "--email",
+            "user@example.com",
+            "--root",
+            str(root_dir),
+            "--yes",
+        ]
+    )
+    assert code == GUARD_FAILED
+    captured = capsys.readouterr()
+    assert "URLs starting with '-' are not permitted" in captured.err
 
 
 def test_init_invalid_email_fails(

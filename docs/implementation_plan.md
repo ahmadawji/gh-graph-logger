@@ -53,9 +53,8 @@ flowchart LR
 | Situation | Behaviour |
 |---|---|
 | Valid clone | Normal push |
-| Folder missing | Stops with: *"Log repo not found at X. Run `ghlog init --path <new>` or `ghlog init --reclone`."* |
+| Folder missing | Stops with: *"Log repo not found at X. Run `ghlog init --path <new>` or run `ghlog init`."* |
 | `origin` URL doesn't match | Refuses to write anything, so logs never go to the wrong repo |
-| `--reclone` while a log commit is still unpushed | Warns that the unpushed log commits will be lost, and asks for confirmation |
 
 ### 2. Separate identity for the log repo
 - `ghlog init` asks for your **GitHub email**, meaning a verified email or your `noreply` address.
@@ -87,7 +86,7 @@ flowchart LR
 
 | Command | Purpose |
 |---|---|
-| `ghlog init [--root DIR] [--path P] [--reclone] [--url URL] [--email EMAIL] [--branch BRANCH] [--name NAME] [--yes]` | Configures the log repository. Prompts for URL, root directory (default `~/.gh-graph-logger`), and GitHub email if not passed via `--url`, `--root`, `--email`. `--root` clones under DIR; `--path` adopts an existing moved clone; `--reclone` deletes and re-clones fresh; `--yes` accepts defaults and auto-creates root. |
+| `ghlog init [--root DIR] [--path P] [--url URL] [--email EMAIL] [--branch BRANCH] [--name NAME] [--yes]` | Configures the log repository. Prompts for URL, root directory (default `~/.gh-graph-logger`), and GitHub email if not passed via `--url`, `--root`, `--email`. `--root` clones under DIR; `--path` adopts an existing moved clone; `--yes` accepts defaults and auto-creates root. |
 | `ghlog check` | Shows ✅ or ❌ for git, inside a repo, the log repo clone, and remote access (`git ls-remote`) |
 | `ghlog collect [--since] [--author] [--full] [--project]` | Runs the checks, opens the draft in the editor, then asks for confirmation and pushes |
 | `ghlog push [--yes]` | Pushes an existing draft, with a confirmation prompt. Also retries log commits that weren't pushed |
@@ -134,7 +133,8 @@ Reads and writes `~/.gh-graph-logger/config.toml` (or `$GHLOG_HOME/config.toml`)
 #### [NEW] guards.py
 `require_git()`, `require_git_repo()`, `require_log_repo()` (the clone checks from point 1) and `require_remote_access()` (`git ls-remote` with a timeout).
 #### [MODIFY] cli.py
-Implements `init` (prompts, choosing the root directory with `--root`, cloning, setting the local identity, `--path`, `--reclone`, plus non-interactive testability flags `--url`, `--email`, `--branch`, `--name`, `--yes`), `check` and `config --show`.
+Implements `init` (prompts, choosing the root directory with `--root`, cloning, setting the local identity, `--path`, plus non-interactive testability flags `--url`, `--email`, `--branch`, `--name`, `--yes`), `check` and `config --show`.
+Strictly non-destructive: no directory deletions.
 
 **Done when:** tests pass for a missing repo, a moved clone, a mismatched URL, an unreachable remote, a custom `--root`, a root that doesn't exist yet, and a root that is inside a work repo.
 

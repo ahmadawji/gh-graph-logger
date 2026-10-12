@@ -19,12 +19,22 @@ from gh_graph_logger.guards import (
 
 
 def test_normalize_repo_url() -> None:
-    """normalize_repo_url standardizes URLs, trailing slashes, and .git extensions."""
+    """normalize_repo_url standardizes URLs, trailing slashes, .git, and SSH/HTTPS."""
     assert normalize_repo_url("https://github.com/org/repo.git") == "https://github.com/org/repo"
     assert normalize_repo_url("https://github.com/org/repo.git/") == "https://github.com/org/repo"
     assert normalize_repo_url("https://github.com/org/repo/") == "https://github.com/org/repo"
     assert normalize_repo_url("file:///c:/logs/repo.git") == "c:/logs/repo"
     assert normalize_repo_url("C:\\logs\\repo.git\\") == "c:/logs/repo"
+
+    # GitHub SSH vs HTTPS equivalence (case-insensitive)
+    ssh_url = "git@github.com:MyOrg/MyRepo.git"
+    https_url = "https://github.com/myorg/myrepo"
+    assert normalize_repo_url(ssh_url) == normalize_repo_url(https_url)
+    assert normalize_repo_url("ssh://git@github.com/MyOrg/MyRepo") == normalize_repo_url(https_url)
+
+    # Hyphen injection rejection
+    with pytest.raises(GuardError, match="URLs starting with '-' are not permitted"):
+        normalize_repo_url("--upload-pack=calc.exe")
 
 
 def test_require_git_success() -> None:
