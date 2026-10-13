@@ -154,9 +154,14 @@ def load_config() -> Config | None:
 
     required_fields = ["log_repo_url", "clone_path", "branch", "github_email"]
     for field_name in required_fields:
-        if field_name not in data or not isinstance(data[field_name], str):
+        if (
+            field_name not in data
+            or not isinstance(data[field_name], str)
+            or not data[field_name].strip()
+        ):
             raise ConfigError(
-                f"Configuration file '{file_path}' is missing required string field '{field_name}'."
+                f"Configuration file '{file_path}' has missing or empty required field "
+                f"'{field_name}'."
             )
 
     last_push_data = data.get("last_push", {})

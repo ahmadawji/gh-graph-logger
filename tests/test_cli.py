@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pytest
@@ -12,8 +13,10 @@ from gh_graph_logger.cli import (
     ERROR,
     GUARD_FAILED,
     OK,
+    _configure_clone_identity,
     format_status,
     main,
+    repo_name_from_url,
 )
 from gh_graph_logger.config import Config, save_config
 from gh_graph_logger.gitutil import run_git
@@ -528,3 +531,132 @@ def test_format_status_encoding_fallback(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(sys, "stdout", DummyStream())
     assert format_status(True) == "[OK]"
     assert format_status(False) == "[FAIL]"
+
+
+def test_repo_name_from_url_sanitization() -> None:
+    """repo_name_from_url sanitizes directory traversal characters and falls back to log-repo."""
+    assert repo_name_from_url("https://github.com/org/..") == "log-repo"
+    assert repo_name_from_url("https://github.com/org/../") == "log-repo"
+    assert repo_name_from_url("..") == "log-repo"
+    assert repo_name_from_url(".") == "log-repo"
+    assert repo_name_from_url("https://github.com/org/my-project.git") == "my-project"
+    assert repo_name_from_url("https://github.com/org/my.project") == "my.project"
+
+
+def test_init_mutually_exclusive_root_and_path(tmp_path: Path) -> None:
+    """--root and --path cannot be used together."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["init", "--root", str(tmp_path), "--path", str(tmp_path / "clone")])
+    assert exc_info.value.code == 2
+
+
+def test_init_path_traversal_fails(
+    ghlog_home: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Path traversal resulting in target outside root raises GuardError."""
+    monkeypatch.setattr("gh_graph_logger.cli.repo_name_from_url", lambda url: "../escaped")
+    code = main(
+        [
+            "init",
+            "--url",
+            str(seeded_remote),
+            "--email",
+            "user@example.com",
+            "--root",
+            str(tmp_path),
+            "--yes",
+        ]
+    )
+    assert code == GUARD_FAILED
+    captured = capsys.readouterr()
+    assert "Invalid repository URL resulting in path traversal" in captured.err
+
+
+def test_init_invalid_email_fast_fails_before_clone(
+    ghlog_home: Path, seeded_remote: Path, tmp_path: Path
+) -> None:
+    """Invalid email fails before git clone is executed, leaving no directory on disk."""
+    root_dir = tmp_path / "fast_fail_root"
+    code = main(
+        [
+            "init",
+            "--url",
+            str(seeded_remote),
+            "--email",
+            "invalid-email-without-at",
+            "--root",
+            str(root_dir),
+            "--yes",
+        ]
+    )
+    assert code == GUARD_FAILED
+    expected_target = root_dir / "seeded_remote"
+    assert not expected_target.exists()
+
+
+def test_init_honors_branch_during_clone(
+    ghlog_home: Path, seeded_remote: Path, tmp_path: Path
+) -> None:
+    """When --branch is supplied, clone creates and checks out the specified branch."""
+    run_git(["branch", "feature-branch"], cwd=seeded_remote)
+    root_dir = tmp_path / "branch_root"
+    code = main(
+        [
+            "init",
+            "--url",
+            str(seeded_remote),
+            "--email",
+            "user@example.com",
+            "--root",
+            str(root_dir),
+            "--branch",
+            "feature-branch",
+            "--yes",
+        ]
+    )
+    assert code == OK
+    target_clone = root_dir / "seeded_remote"
+    current_branch = run_git(["branch", "--show-current"], cwd=target_clone).strip()
+    assert current_branch == "feature-branch"
+
+
+def test_init_path_nested_inside_work_repo_fails(
+    ghlog_home: Path, git_repo: Path, seeded_remote: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ghlog init --path fails if the clone is nested inside an existing git repository."""
+    nested_clone = git_repo / "sub_folder" / "nested_clone"
+    run_git(["clone", str(seeded_remote), str(nested_clone)])
+
+    code = main(
+        [
+            "init",
+            "--path",
+            str(nested_clone),
+            "--url",
+            str(seeded_remote),
+            "--email",
+            "user@example.com",
+            "--yes",
+        ]
+    )
+    assert code == GUARD_FAILED
+    captured = capsys.readouterr()
+    assert "cannot be nested inside another git repository" in captured.err
+
+
+def test_configure_clone_identity_uses_local_and_delimiter(tmp_path: Path) -> None:
+    """_configure_clone_identity uses --local and -- to prevent argument injection."""
+    repo_dir = tmp_path / "test_identity_repo"
+    run_git(["init", str(repo_dir)])
+
+    args = argparse.Namespace(name="--system-test", yes=True)
+    _configure_clone_identity(repo_dir, "test@example.com", args)
+
+    email = run_git(["config", "--local", "user.email"], cwd=repo_dir).strip()
+    name = run_git(["config", "--local", "user.name"], cwd=repo_dir).strip()
+    assert email == "test@example.com"
+    assert name == "--system-test"

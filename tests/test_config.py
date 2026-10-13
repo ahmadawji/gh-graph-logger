@@ -89,6 +89,26 @@ def test_load_config_corrupt_content_raises_config_error(
         load_config()
 
 
+@pytest.mark.parametrize(
+    "empty_field_toml",
+    [
+        'log_repo_url = ""\nclone_path = "p"\nbranch = "b"\ngithub_email = "e@mail"',
+        'log_repo_url = "   "\nclone_path = "p"\nbranch = "b"\ngithub_email = "e@mail"',
+        'log_repo_url = "u"\nclone_path = ""\nbranch = "b"\ngithub_email = "e@mail"',
+        'log_repo_url = "u"\nclone_path = "p"\nbranch = "  "\ngithub_email = "e@mail"',
+        'log_repo_url = "u"\nclone_path = "p"\nbranch = "b"\ngithub_email = ""',
+    ],
+)
+def test_load_config_empty_required_field_raises_config_error(
+    ghlog_home: Path, empty_field_toml: str
+) -> None:
+    """Empty or whitespace-only required fields raise ConfigError."""
+    target_file = config_path()
+    target_file.write_text(empty_field_toml, encoding="utf-8")
+    with pytest.raises(ConfigError, match="has missing or empty required field"):
+        load_config()
+
+
 def test_parse_simple_toml_fallback_parser() -> None:
     """The built-in TOML parser correctly parses valid config subsets."""
     sample_toml = """

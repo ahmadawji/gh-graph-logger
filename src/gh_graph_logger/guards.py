@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from gh_graph_logger.config import Config
@@ -37,9 +38,27 @@ def normalize_repo_url(repository_url: str) -> str:
             hint="Provide a valid git URL or local path.",
         )
 
+    # Reject dangerous or unsupported custom transport protocols (e.g. ext::, fd::)
+    if cleaned_url.lower().startswith(("ext::", "fd::")):
+        raise GuardError(
+            f"Dangerous or unsupported git protocol in URL '{repository_url}'.",
+            hint="Use https://, ssh://, git@github.com, file://, or a local directory path.",
+        )
+
     # Strip file URL prefixes if present
     if cleaned_url.startswith("file:///"):
-        cleaned_url = cleaned_url[8:]
+        remainder = cleaned_url[8:]
+        drive, _ = os.path.splitdrive(remainder)
+        has_drive = bool(drive) or (
+            len(remainder) >= 2
+            and remainder[0].isascii()
+            and remainder[0].isalpha()
+            and remainder[1] == ":"
+        )
+        if has_drive or remainder.startswith("/"):
+            cleaned_url = remainder
+        else:
+            cleaned_url = "/" + remainder
     elif cleaned_url.startswith("file://"):
         cleaned_url = cleaned_url[7:]
 
@@ -186,15 +205,16 @@ def require_log_repo(config: Config) -> Path:
 def require_remote_access(repository_url: str) -> None:
     """Verify that the remote repository is reachable.
 
-    Runs `git ls-remote --exit-code <url> HEAD` with GIT_TERMINAL_PROMPT=0.
+    Runs `git ls-remote --exit-code -- <url> HEAD` with GIT_TERMINAL_PROMPT=0.
     An empty remote repository with no HEAD (exit code 2) is considered reachable.
 
     Raises:
         GuardError: If the remote cannot be reached or does not exist.
     """
+    normalize_repo_url(repository_url)
     try:
         run_git(
-            ["ls-remote", "--exit-code", repository_url, "HEAD"],
+            ["ls-remote", "--exit-code", "--", repository_url, "HEAD"],
             env={"GIT_TERMINAL_PROMPT": "0"},
             timeout=20,
             check=True,

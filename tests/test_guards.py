@@ -28,6 +28,7 @@ def test_normalize_repo_url() -> None:
     assert normalize_repo_url("C:\\logs\\repo.git\\") == "c:/logs/repo"
     assert normalize_repo_url("D:\\Logs\\MyRepo.git\\") == "d:/Logs/MyRepo"
     assert normalize_repo_url("/var/Logs/MyRepo.git/") == "/var/Logs/MyRepo"
+    assert normalize_repo_url("file:///home/user/repo.git") == "/home/user/repo"
 
     # GitHub SSH vs HTTPS equivalence (case-insensitive)
     ssh_url = "git@github.com:MyOrg/MyRepo.git"
@@ -38,6 +39,12 @@ def test_normalize_repo_url() -> None:
     # Hyphen injection rejection
     with pytest.raises(GuardError, match="URLs starting with '-' are not permitted"):
         normalize_repo_url("--upload-pack=calc.exe")
+
+    # Custom transport protocol injection rejection
+    with pytest.raises(GuardError, match="Dangerous or unsupported git protocol"):
+        normalize_repo_url("ext::sh -c evil")
+    with pytest.raises(GuardError, match="Dangerous or unsupported git protocol"):
+        normalize_repo_url("fd::0")
 
 
 def test_require_git_success() -> None:
@@ -165,3 +172,12 @@ def test_require_remote_access_unreachable_fails(tmp_path: Path) -> None:
     with pytest.raises(GuardError, match="Cannot access remote repository") as exc_info:
         require_remote_access(str(non_existent))
     assert "Check repository URL" in exc_info.value.hint
+
+
+def test_require_remote_access_rejects_injected_url() -> None:
+    """require_remote_access rejects dangerous URLs to prevent argument injection."""
+    with pytest.raises(GuardError, match="URLs starting with '-' are not permitted"):
+        require_remote_access("--upload-pack=evil")
+
+    with pytest.raises(GuardError, match="Dangerous or unsupported git protocol"):
+        require_remote_access("ext::sh -c evil")

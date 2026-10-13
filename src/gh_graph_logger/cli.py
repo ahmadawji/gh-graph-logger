@@ -89,7 +89,14 @@ def repo_name_from_url(repository_url: str) -> str:
         extracted_name = cleaned_url[split_index + 1 :]
     else:
         extracted_name = cleaned_url
-    return extracted_name.strip()
+    extracted_name = extracted_name.strip()
+
+    # Sanitize name: strip path traversal characters and fall back
+    # to 'log-repo' if empty or '.' / '..'
+    extracted_name = extracted_name.replace("..", "").strip("/\\ .")
+    if not extracted_name or extracted_name in (".", ".."):
+        return "log-repo"
+    return extracted_name
 
 
 def _resolve_and_validate_email(
@@ -124,10 +131,10 @@ def _configure_clone_identity(
     arguments: argparse.Namespace,
 ) -> None:
     """Set user.email and optionally user.name in the log repository clone."""
-    run_git(["config", "user.email", github_email], cwd=clone_path)
+    run_git(["config", "--local", "--", "user.email", github_email], cwd=clone_path)
 
     if arguments.name:
-        run_git(["config", "user.name", arguments.name], cwd=clone_path)
+        run_git(["config", "--local", "--", "user.name", arguments.name], cwd=clone_path)
     elif not arguments.yes:
         try:
             global_user_name = run_git(["config", "--global", "user.name"]).strip()
@@ -137,12 +144,12 @@ def _configure_clone_identity(
             "Git user name for log commits", default=global_user_name or None
         )
         if chosen_user_name:
-            run_git(["config", "user.name", chosen_user_name], cwd=clone_path)
+            run_git(["config", "--local", "--", "user.name", chosen_user_name], cwd=clone_path)
     else:
         try:
             global_user_name = run_git(["config", "--global", "user.name"]).strip()
             if global_user_name:
-                run_git(["config", "user.name", global_user_name], cwd=clone_path)
+                run_git(["config", "--local", "--", "user.name", global_user_name], cwd=clone_path)
         except GitError:
             pass
 
@@ -208,6 +215,8 @@ def handle_init(arguments: argparse.Namespace) -> int:
             safe_print("Error: Log repository URL is required.", file=sys.stderr)
             return ERROR
 
+        normalize_repo_url(repository_url)
+
         # Warn if remote access fails rather than blocking offline adoption
         try:
             require_remote_access(repository_url)
@@ -223,6 +232,15 @@ def handle_init(arguments: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return ERROR
+
+        try:
+            run_git(["rev-parse", "--show-toplevel"], cwd=specified_clone_path.parent)
+            raise GuardError(
+                f"Log repo clone at '{specified_clone_path}' cannot be nested "
+                "inside another git repository."
+            )
+        except GitError:
+            pass
 
         try:
             repository_top_level = Path(
@@ -337,6 +355,10 @@ def handle_init(arguments: argparse.Namespace) -> int:
         repository_folder_name = "log-repo"
 
     target_clone_path = (root_directory / repository_folder_name).resolve()
+    if target_clone_path.parent != root_directory:
+        raise GuardError("Invalid repository URL resulting in path traversal.")
+
+    github_email = _resolve_and_validate_email(arguments, existing_configuration)
 
     # Handle existing target directory (Strictly non-destructive)
     if target_clone_path.exists():
@@ -365,13 +387,16 @@ def handle_init(arguments: argparse.Namespace) -> int:
             return ERROR
     else:
         safe_print(f"Cloning {repository_url} into {target_clone_path}...")
+        clone_args = ["clone"]
+        if arguments.branch:
+            clone_args.extend(["--branch", arguments.branch])
+        clone_args.extend(["--", repository_url, str(target_clone_path)])
         run_git(
-            ["clone", "--", repository_url, str(target_clone_path)],
+            clone_args,
             env={"GIT_TERMINAL_PROMPT": "0"},
             timeout=300,
         )
 
-    github_email = _resolve_and_validate_email(arguments, existing_configuration)
     _configure_clone_identity(target_clone_path, github_email, arguments)
     branch_name = _resolve_branch_name(
         target_clone_path, arguments.branch, existing_configuration
@@ -441,6 +466,7 @@ def handle_check(arguments: argparse.Namespace) -> int:
                 safe_print(f"   Hint: {exception.hint}")
 
         try:
+            normalize_repo_url(loaded_configuration.log_repo_url)
             require_remote_access(loaded_configuration.log_repo_url)
             safe_print(f"{format_status(True)} Remote access ({loaded_configuration.log_repo_url})")
         except GuardError as exception:
@@ -513,8 +539,9 @@ def build_parser() -> argparse.ArgumentParser:
         "init",
         help="Initialize or configure the log repo clone.",
     )
-    parser_init.add_argument("--root", type=str, help="Root directory for the log repo")
-    parser_init.add_argument("--path", type=str, help="Path to an existing log repo clone")
+    root_group = parser_init.add_mutually_exclusive_group()
+    root_group.add_argument("--root", type=str, help="Root directory for the log repo")
+    root_group.add_argument("--path", type=str, help="Path to an existing log repo clone")
     parser_init.add_argument("--url", type=str, help="Git URL of the log repository")
     parser_init.add_argument("--email", type=str, help="GitHub email for log commits")
     parser_init.add_argument(
