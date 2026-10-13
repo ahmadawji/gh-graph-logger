@@ -313,3 +313,69 @@ def test_collect_prompts_project_name_when_not_configured(
         ["config", "--local", "ghlog.project"], cwd=configured_environment
     ).strip()
     assert stored_project == "first-prompt-project"
+
+
+def test_collect_full_body_bullets_emptied_real_bullets_aborts(
+    configured_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Deleting the root commit bullet while leaving indented body bullets aborts as empty."""
+    today_iso = datetime.now().astimezone().strftime("%Y-%m-%dT12:00:00")
+    env = {
+        "GIT_AUTHOR_NAME": "Test User",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test User",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+        "GIT_AUTHOR_DATE": today_iso,
+        "GIT_COMMITTER_DATE": today_iso,
+    }
+    (configured_environment / "bullet_file.txt").write_text("hello", encoding="utf-8")
+    run_git(["add", "bullet_file.txt"], cwd=configured_environment)
+    run_git(
+        ["commit", "-m", "A commit with sub bullets", "-m", "- item one\n- item two"],
+        cwd=configured_environment,
+        env=env,
+    )
+
+    def fake_editor_delete_root_bullet(repo_root: Path, path: Path) -> None:
+        content = path.read_text(encoding="utf-8")
+        # Keep only lines that don't start with "- " at column 0
+        new_lines = [line for line in content.splitlines() if not line.startswith("- ")]
+        path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+    from gh_graph_logger import draft
+    monkeypatch.setattr(draft, "open_editor", fake_editor_delete_root_bullet)
+
+    code = main(["collect", "--full"])
+    assert code == ABORTED
+    captured = capsys.readouterr()
+    assert "Nothing to log - draft discarded." in captured.out
+
+
+def test_collect_reopen_reappends_instructions_if_missing(
+    configured_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When reopening an existing draft without comments, instructions are re-appended."""
+    draft_file = draft_path(configured_environment)
+    # Draft with commits but no '# ' instructions
+    clean_draft = "## demo — 2026-10-13 10:00\n\n- 10:00 `abcdef0` Some commit\n"
+    draft_file.write_text(clean_draft, encoding="utf-8")
+
+    saw_instructions_in_editor = False
+
+    def fake_editor_check_instructions(repo_root: Path, path: Path) -> None:
+        nonlocal saw_instructions_in_editor
+        text = path.read_text(encoding="utf-8")
+        if "# Lines starting with '#' are comments" in text:
+            saw_instructions_in_editor = True
+
+    from gh_graph_logger import draft
+    monkeypatch.setattr(draft, "open_editor", fake_editor_check_instructions)
+    monkeypatch.setattr("builtins.input", lambda _: "r")
+
+    code = main(["collect"])
+    assert code == OK
+    assert saw_instructions_in_editor is True

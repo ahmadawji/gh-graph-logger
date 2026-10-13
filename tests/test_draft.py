@@ -32,14 +32,15 @@ def test_render_draft_without_and_with_body() -> None:
 
     # Without body
     draft_no_body = render_draft("my-project", [commit], generated_at=now, include_body=False)
+    expected_time = commit.authored_at.astimezone().strftime("%H:%M")
     assert "## my-project — 2026-10-13 14:30" in draft_no_body
-    assert "- 14:25 `0123456` Add awesome feature" in draft_no_body
+    assert f"- {expected_time} `0123456` Add awesome feature" in draft_no_body
     assert "Detailed description" not in draft_no_body
     assert "# Lines starting with '#' are comments" in draft_no_body
 
     # With body
     draft_with_body = render_draft("my-project", [commit], generated_at=now, include_body=True)
-    assert "- 14:25 `0123456` Add awesome feature" in draft_with_body
+    assert f"- {expected_time} `0123456` Add awesome feature" in draft_with_body
     assert "  Detailed description" in draft_with_body
     assert "  across two lines" in draft_with_body
 
@@ -71,7 +72,7 @@ def test_strip_comments_rule() -> None:
 def test_has_commits() -> None:
     """has_commits returns True if and only if at least one commit bullet remains."""
     assert has_commits("- 14:25 `0123456` Commit subject") is True
-    assert has_commits("  - 14:25 `0123456` Indented bullet") is True
+    assert has_commits("  - 14:25 `0123456` Indented bullet") is False
     assert has_commits("## my-project — 2026-10-13 14:30\n\nNo bullets here") is False
     assert has_commits("") is False
 
@@ -124,3 +125,93 @@ def test_open_editor_missing_binary_raises_git_error(
 
     with pytest.raises(GitError, match="core.editor"):
         open_editor(git_repo, dummy_draft)
+
+
+def test_compute_git_usr_bin_path() -> None:
+    """compute_git_usr_bin_path ascents 3 levels from git-core to reach usr/bin."""
+    from gh_graph_logger.draft import compute_git_usr_bin_path
+
+    # Windows-style path
+    windows_input = "C:/Program Files/Git/mingw64/libexec/git-core"
+    windows_result = compute_git_usr_bin_path(windows_input)
+    assert windows_result == Path("C:/Program Files/Git/usr/bin")
+
+    # POSIX-style path
+    posix_input = "/opt/git/mingw64/libexec/git-core"
+    posix_result = compute_git_usr_bin_path(posix_input)
+    assert posix_result == Path("/opt/git/usr/bin")
+
+
+def test_count_commit_lines_ignores_indented_bullets() -> None:
+    """count_commit_lines only counts bullets starting with '- ' at column 0."""
+    from gh_graph_logger.draft import count_commit_lines
+
+    sample = (
+        "## my-project — 2026-10-13 14:30\n\n"
+        "- 14:25 `0123456` Commit with sub-bullets\n"
+        "  - Indented item 1 in body\n"
+        "  - Indented item 2 in body\n"
+        "- 14:30 `abcdef0` Another commit\n"
+    )
+    assert count_commit_lines(sample) == 2
+
+
+def test_render_draft_converts_to_local_time() -> None:
+    """render_draft formats commit authored_at in local timezone."""
+    from gh_graph_logger.collector import CommitRecord
+
+    # Commit with explicit UTC timezone
+    utc_dt = datetime(2026, 10, 13, 14, 25, tzinfo=timezone.utc)
+    commit = CommitRecord(
+        full_hash="1111111111111111111111111111111111111111",
+        short_hash="1111111",
+        authored_at=utc_dt,
+        subject="Check local timezone",
+        body="",
+    )
+    draft_text = render_draft("test-tz", [commit], generated_at=datetime.now().astimezone())
+    expected_local_time = utc_dt.astimezone().strftime("%H:%M")
+    assert f"- {expected_local_time} `1111111` Check local timezone" in draft_text
+
+
+def test_open_editor_passes_augmented_env_and_maps_vi(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """open_editor augments PATH and maps bare 'vi' to 'vim' on Windows when vi.exe is absent."""
+    import subprocess
+
+    from gh_graph_logger import draft
+
+    run_git(["config", "core.editor", "vi"], cwd=git_repo)
+    dummy_file = tmp_path / "dummy.md"
+    dummy_file.write_text("dummy", encoding="utf-8")
+
+    captured_args = []
+    captured_env = {}
+
+    real_subprocess_run = subprocess.run
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        if cmd[0] == "git":
+            return real_subprocess_run(cmd, *args, **kwargs)
+        captured_args.extend(cmd)
+        if "env" in kwargs and kwargs["env"]:
+            captured_env.update(kwargs["env"])
+        return subprocess.CompletedProcess(cmd, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr("os.name", "nt")
+    fake_usr_bin = tmp_path / "fake_usr_bin"
+    fake_usr_bin.mkdir()
+    # Create vim.exe but not vi.exe
+    (fake_usr_bin / "vim.exe").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(draft, "get_git_usr_bin", lambda repo_root: fake_usr_bin)
+
+    draft.open_editor(git_repo, dummy_file)
+
+    # vi should be mapped to vim
+    assert captured_args[0] == "vim"
+    # PATH should include fake_usr_bin
+    assert str(fake_usr_bin) in captured_env.get("PATH", "")
+

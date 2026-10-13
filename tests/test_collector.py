@@ -264,3 +264,131 @@ def test_collect_commits_separator_chars_and_non_utf8(git_repo: Path) -> None:
     assert len(commits) >= 1
     sep_commit = [c for c in commits if c.subject == "Subject with sep"][0]
     assert "still body" in sep_commit.body
+
+
+def test_collect_commits_author_with_plus_sign(git_repo: Path) -> None:
+    """collect_commits matches author emails containing '+' such as GitHub noreply addresses."""
+    plus_email = "12345+octo@users.noreply.github.com"
+    env_plus = {
+        "GIT_AUTHOR_NAME": "Octo",
+        "GIT_AUTHOR_EMAIL": plus_email,
+        "GIT_COMMITTER_NAME": "Octo",
+        "GIT_COMMITTER_EMAIL": plus_email,
+        "GIT_AUTHOR_DATE": "2026-10-13T10:00:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-10-13T10:00:00+00:00",
+    }
+    (git_repo / "plus_file.txt").write_text("plus", encoding="utf-8")
+    run_git(["add", "plus_file.txt"], cwd=git_repo)
+    run_git(["commit", "-m", "Commit with plus address"], cwd=git_repo, env=env_plus)
+
+    since = datetime(2026, 10, 13, 0, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 10, 13, 23, 59, tzinfo=timezone.utc)
+
+    commits = collect_commits(
+        git_repo, since=since, until=until, author_emails=[plus_email], include_body=False
+    )
+    assert len(commits) == 1
+    assert commits[0].subject == "Commit with plus address"
+
+
+def test_collect_commits_case_insensitive_and_multiple_ored(git_repo: Path) -> None:
+    """collect_commits supports case-insensitive author matching and multiple ORed emails."""
+    email_a = "alice@example.com"
+    email_b = "bob@example.com"
+
+    env_a = {
+        "GIT_AUTHOR_NAME": "Alice",
+        "GIT_AUTHOR_EMAIL": "Alice@Example.COM",  # Mixed case in commit
+        "GIT_COMMITTER_NAME": "Alice",
+        "GIT_COMMITTER_EMAIL": "Alice@Example.COM",
+        "GIT_AUTHOR_DATE": "2026-10-13T10:10:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-10-13T10:10:00+00:00",
+    }
+    (git_repo / "a.txt").write_text("a", encoding="utf-8")
+    run_git(["add", "a.txt"], cwd=git_repo)
+    run_git(["commit", "-m", "Commit from Alice"], cwd=git_repo, env=env_a)
+
+    env_b = {
+        "GIT_AUTHOR_NAME": "Bob",
+        "GIT_AUTHOR_EMAIL": email_b,
+        "GIT_COMMITTER_NAME": "Bob",
+        "GIT_COMMITTER_EMAIL": email_b,
+        "GIT_AUTHOR_DATE": "2026-10-13T10:20:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-10-13T10:20:00+00:00",
+    }
+    (git_repo / "b.txt").write_text("b", encoding="utf-8")
+    run_git(["add", "b.txt"], cwd=git_repo)
+    run_git(["commit", "-m", "Commit from Bob"], cwd=git_repo, env=env_b)
+
+    since = datetime(2026, 10, 13, 0, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 10, 13, 23, 59, tzinfo=timezone.utc)
+
+    # Search with lowercase email_a and email_b
+    commits = collect_commits(
+        git_repo, since=since, until=until, author_emails=[email_a, email_b], include_body=False
+    )
+    subjects = [c.subject for c in commits]
+    assert "Commit from Alice" in subjects
+    assert "Commit from Bob" in subjects
+
+
+def test_collect_commits_same_timestamp_oldest_first(git_repo: Path) -> None:
+    """Commits created with the exact same timestamp must be ordered oldest-first."""
+    email = "tester@example.com"
+    same_time = "2026-10-13T12:00:00+00:00"
+    env_same = {
+        "GIT_AUTHOR_NAME": "Tester",
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": "Tester",
+        "GIT_COMMITTER_EMAIL": email,
+        "GIT_AUTHOR_DATE": same_time,
+        "GIT_COMMITTER_DATE": same_time,
+    }
+
+    (git_repo / "tie1.txt").write_text("1", encoding="utf-8")
+    run_git(["add", "tie1.txt"], cwd=git_repo)
+    run_git(["commit", "-m", "First in tie"], cwd=git_repo, env=env_same)
+
+    (git_repo / "tie2.txt").write_text("2", encoding="utf-8")
+    run_git(["add", "tie2.txt"], cwd=git_repo)
+    run_git(["commit", "-m", "Second in tie"], cwd=git_repo, env=env_same)
+
+    (git_repo / "tie3.txt").write_text("3", encoding="utf-8")
+    run_git(["add", "tie3.txt"], cwd=git_repo)
+    run_git(["commit", "-m", "Third in tie"], cwd=git_repo, env=env_same)
+
+    since = datetime(2026, 10, 13, 0, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 10, 13, 23, 59, tzinfo=timezone.utc)
+
+    commits = collect_commits(
+        git_repo, since=since, until=until, author_emails=[email], include_body=False
+    )
+    tie_subjects = [c.subject for c in commits if "in tie" in c.subject]
+    assert tie_subjects == ["First in tie", "Second in tie", "Third in tie"]
+
+
+def test_collect_commits_detached_head(git_repo: Path) -> None:
+    """collect_commits collects commits from a detached HEAD state."""
+    email = "tester@example.com"
+    env = {
+        "GIT_AUTHOR_NAME": "Tester",
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": "Tester",
+        "GIT_COMMITTER_EMAIL": email,
+        "GIT_AUTHOR_DATE": "2026-10-13T13:00:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-10-13T13:00:00+00:00",
+    }
+    run_git(["checkout", "--detach"], cwd=git_repo)
+    (git_repo / "detached.txt").write_text("detached", encoding="utf-8")
+    run_git(["add", "detached.txt"], cwd=git_repo)
+    run_git(["commit", "-m", "Commit on detached HEAD"], cwd=git_repo, env=env)
+
+    since = datetime(2026, 10, 13, 0, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 10, 13, 23, 59, tzinfo=timezone.utc)
+
+    commits = collect_commits(
+        git_repo, since=since, until=until, author_emails=[email], include_body=False
+    )
+    subjects = [c.subject for c in commits]
+    assert "Commit on detached HEAD" in subjects
+

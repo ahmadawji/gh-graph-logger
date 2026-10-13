@@ -558,9 +558,7 @@ def handle_collect(arguments: argparse.Namespace) -> int:
 
     if target_draft_path.exists() and target_draft_path.stat().st_size > 0:
         existing_draft_text = target_draft_path.read_text(encoding="utf-8")
-        existing_commits_count = sum(
-            1 for line in existing_draft_text.splitlines() if line.strip().startswith("- ")
-        )
+        existing_commits_count = draft.count_commit_lines(existing_draft_text)
         while True:
             choice = prompt(
                 f"A draft already exists ({existing_commits_count} commits). "
@@ -569,6 +567,8 @@ def handle_collect(arguments: argparse.Namespace) -> int:
             ).strip().lower()
             if choice in ("r", "reopen", ""):
                 reopen_existing_draft = True
+                updated_draft_text = draft.reappend_instructions_if_missing(existing_draft_text)
+                target_draft_path.write_text(updated_draft_text, encoding="utf-8", newline="\n")
                 break
             if choice in ("o", "overwrite"):
                 reopen_existing_draft = False
@@ -613,9 +613,7 @@ def handle_collect(arguments: argparse.Namespace) -> int:
         return ABORTED
 
     target_draft_path.write_text(cleaned_content + "\n", encoding="utf-8", newline="\n")
-    saved_commits_count = sum(
-        1 for line in cleaned_content.splitlines() if line.strip().startswith("- ")
-    )
+    saved_commits_count = draft.count_commit_lines(cleaned_content)
     safe_print(
         f"Draft saved to {target_draft_path} with {saved_commits_count} commits. "
         "Publishing arrives in the next phase."

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -200,24 +199,30 @@ def collect_commits(
     command_arguments = [
         "log",
         "--branches",
+        "HEAD",
         "--no-merges",
+        "--reverse",
         f"--since={since.isoformat()}",
         f"--until={until.isoformat()}",
+        "--fixed-strings",
         "--regexp-ignore-case",
         "--date=iso-strict",
         "--pretty=format:%H%x1f%aI%x1f%s%x1f%b%x1e",
     ]
 
     for email in author_emails:
-        escaped_email = re.escape(email)
-        command_arguments.append(f"--author=<{escaped_email}>")
+        command_arguments.append(f"--author=<{email}>")
 
     try:
         raw_output = run_git(command_arguments, cwd=repo_root)
     except GitError as exception:
         # Repositories with no commits or missing HEAD
         error_text = (exception.stderr + " " + exception.message).lower()
-        if "does not have any commits yet" in error_text or "bad default revision" in error_text:
+        if (
+            "does not have any commits yet" in error_text
+            or "bad default revision" in error_text
+            or "unknown revision or path not in the working tree" in error_text
+        ):
             return []
         raise
 

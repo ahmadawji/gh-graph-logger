@@ -61,7 +61,7 @@ def render_draft(
     ]
 
     for commit in commits:
-        commit_time = commit.authored_at.strftime("%H:%M")
+        commit_time = commit.authored_at.astimezone().strftime("%H:%M")
         lines.append(f"- {commit_time} `{commit.short_hash}` {commit.subject}")
         if include_body and commit.body:
             for body_line in commit.body.splitlines():
@@ -78,6 +78,23 @@ def render_draft(
     lines.append("")
 
     return "\n".join(lines)
+
+
+def reappend_instructions_if_missing(text: str) -> str:
+    """Re-append comment instructions to draft text if no comment lines exist."""
+    has_comments_present = any(
+        line.startswith("#") and not line.startswith("##")
+        for line in text.splitlines()
+    )
+    if not has_comments_present:
+        instruction_block = (
+            "\n\n# Lines starting with '#' are comments and will be ignored.\n"
+            "# Review your commits above and remove anything confidential or sensitive.\n"
+            "# The '##' heading above will be preserved.\n"
+            "# An empty file or removing all commit bullets will discard the draft.\n"
+        )
+        return text.rstrip() + instruction_block
+    return text
 
 
 def strip_comments(text: str) -> str:
@@ -98,12 +115,39 @@ def strip_comments(text: str) -> str:
     return "\n".join(retained_lines).rstrip()
 
 
+def count_commit_lines(text: str) -> int:
+    """Count the number of commit bullet lines starting with '- ' at column 0."""
+    return sum(1 for line in text.splitlines() if line.startswith("- "))
+
+
 def has_commits(cleaned_text: str) -> bool:
     """Return True if at least one commit bullet line remains in cleaned draft."""
-    for line in cleaned_text.splitlines():
-        if line.strip().startswith("- "):
-            return True
-    return False
+    return count_commit_lines(cleaned_text) > 0
+
+
+def compute_git_usr_bin_path(exec_path: str) -> Path:
+    """Compute git's usr/bin directory by ascending 3 levels from git --exec-path.
+
+    Example:
+        'C:/Program Files/Git/mingw64/libexec/git-core' -> 'C:/Program Files/Git/usr/bin'
+        '/usr/lib/git-core' -> '/usr/bin'
+    """
+    cleaned_path = Path(exec_path.strip().replace("\\", "/"))
+    return cleaned_path.parent.parent.parent / "usr" / "bin"
+
+
+def get_git_usr_bin(repo_root: Path | None = None) -> Path | None:
+    """Locate git's usr/bin directory on Windows if present."""
+    if os.name != "nt":
+        return None
+    try:
+        exec_path = run_git(["--exec-path"], cwd=repo_root).strip()
+        candidate = compute_git_usr_bin_path(exec_path)
+        if candidate.is_dir():
+            return candidate
+    except GitError:
+        pass
+    return None
 
 
 def resolve_editor_command(repo_root: Path) -> list[str]:
@@ -154,6 +198,8 @@ def open_editor(repo_root: Path, path: Path) -> None:
     """Open the draft file in the configured git editor.
 
     Executes the editor command with the draft path appended, inheriting the terminal.
+    On Windows, augments subprocess PATH with Git's usr/bin directory and maps bare 'vi'
+    to 'vim' if vi.exe is absent.
 
     Args:
         repo_root: Root path of the working repository.
@@ -162,11 +208,28 @@ def open_editor(repo_root: Path, path: Path) -> None:
     Raises:
         GitError: If the editor binary is missing or exits with a non-zero exit code.
     """
-    command_tokens = resolve_editor_command(repo_root)
+    command_tokens = list(resolve_editor_command(repo_root))
     full_command = [*command_tokens, str(path)]
 
+    editor_env = os.environ.copy()
+    if os.name == "nt":
+        git_usr_bin = get_git_usr_bin(repo_root)
+        if git_usr_bin is not None:
+            current_path = editor_env.get("PATH", "")
+            if current_path:
+                editor_env["PATH"] = f"{current_path}{os.pathsep}{git_usr_bin}"
+            else:
+                editor_env["PATH"] = str(git_usr_bin)
+
+            if command_tokens[0].lower() == "vi":
+                vi_executable = git_usr_bin / "vi.exe"
+                vim_executable = git_usr_bin / "vim.exe"
+                if not vi_executable.is_file() and vim_executable.is_file():
+                    command_tokens[0] = "vim"
+                    full_command[0] = "vim"
+
     try:
-        process = subprocess.run(full_command, shell=False)
+        process = subprocess.run(full_command, env=editor_env, shell=False)
     except FileNotFoundError as exception:
         raise GitError(
             f"Editor executable '{command_tokens[0]}' was not found on system PATH. "
