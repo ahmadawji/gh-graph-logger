@@ -1,66 +1,74 @@
 # gh-graph-logger 🟩
-A zero-dependency CLI that silently syncs your private repository commits to your GitHub contribution graph.
 
- > Never lose your GitHub contribution squares just because you're working in a private Bitbucket, GitLab, or enterprise repository.
+A zero-dependency Python CLI tool to easily log your daily commits to a private GitHub repository and keep your contribution graph active.
 
+> Keep your GitHub contribution graph active even when working on private client repositories, enterprise Git instances, or offline repositories.
 
-
-`gh-graph-logger` is a lightweight, zero-dependency Node.js CLI tool. It attaches a silent `pre-push` git hook to your local repository. Every time you push code to your private remote, it securely pushes an encrypted, text-only log of your commit to a public GitHub repository, keeping your contribution graph green.
+---
 
 ## ✨ Features
-* **Zero Dependencies:** Built entirely with native Node.js (`fetch`, `readline`). Fast and secure.
-* **Interactive Setup:** No messy bash scripts required.
-* **Non-Blocking:** Runs asynchronously in the background. It will never slow down your actual `git push`.
-* **Secure Configuration:** Stores credentials natively in your local `git config`, not in easily-leaked `.env` files.
+
+- **Zero Runtime Dependencies**: Built entirely with Python standard library modules (`subprocess`, `json`, `argparse`, `pathlib`).
+- **Single Daily Command**: Run `ghlog` at the end of the day to fetch your commits, review them in your editor, and log them in one smooth step.
+- **Privacy & Security First**: Edit or redact any commit subjects in your editor before they are logged. Never logs sensitive code or internal diffs.
+- **Cross-Platform**: Fully tested and supported on Windows, macOS, and Linux across Python 3.10–3.14.
+
+---
 
 ## 🚀 Installation
 
-Install the package globally via npm:
+Install using `pip` (or `pipx`):
 
-```npm install -g gh-graph-logger```
-
-## 🛠️ Setup & Usage
-
-1.  Create a new, public repository on GitHub (e.g., `daily-commits`) and initialize it with a `README.md`.
-    
-2.  Generate a [GitHub Personal Access Token (PAT)](https://github.com/settings/tokens) with `repo` permissions.
-    
-3.  Navigate to your local private repository (e.g., your Bitbucket project) and run:
-    
-
-Bash
-
-```
-gh-graph-logger init
-```
-The CLI will walk you through an interactive prompt:
-
-Plaintext
-
-```
-Let's configure your GitHub connection.
-
-GitHub Personal Access Token (PAT): <paste-your-token>
-GitHub Username: <your-username>
-Target GitHub Repository: daily-commits
-
-✅ Successfully installed pre-push hook and saved configuration!
-
+```bash
+pip install .
 ```
 
-**You're done.** Proceed with your normal workflow. Every `git push` will now trigger a background sync to your GitHub repo.
+This installs both `ghlog` and `gh-graph-logger` CLI commands.
 
-## ⚙️ How It Works
+---
 
-When you run `gh-graph-logger init`, the tool does two things:
+## 🛠️ Getting Started
 
-1.  Saves your GitHub token to your global `~/.gitconfig` and your repo details to your local `.git/config`.
-    
-2.  Creates a `.git/hooks/pre-push` file in your repository that calls `gh-graph-logger sync`.
-    
+### 1. Initialize Log Repository
 
-Whenever you push to your private remote, the hook reads your latest commit message and hash, and uses the GitHub REST API to append a line to your target GitHub repository's `README.md`.
+Create a private repository on GitHub (e.g. `daily-log`) and run:
+
+```bash
+ghlog init --url git@github.com:yourusername/daily-log.git --email your-github@email.com
+```
+
+Or simply run `ghlog init` and follow the interactive prompts.
+
+### 2. Daily Workflow
+
+Whenever you finish working in any repository, simply run:
+
+```bash
+ghlog
+```
+
+`ghlog` will automatically:
+1. Fetch all commits authored by you since midnight (or since your last push).
+2. Open your preferred editor (`$GIT_EDITOR`, `$EDITOR`, `core.editor`, or Notepad/Vim) so you can review and delete any commits you don't wish to log.
+3. Prompt for confirmation (`Push N commit(s) for '<project>' to log repo? [y/N]`).
+4. Commit and push the summary entry into `<clone>/<project>/YYYY-MM-DD.md`.
+
+---
+
+## 📖 Command Reference
+
+| Command | Description |
+|---|---|
+| `ghlog` | Daily logging: grabs today's commits, opens editor, confirms, and pushes. |
+| `ghlog --since "2026-10-01"` | Log commits since a specific date or time. |
+| `ghlog --yes` | Skip confirmation prompt and push automatically. |
+| `ghlog --project custom-name` | Override project name (defaults to repository directory name). |
+| `ghlog init` | Initialize or configure the log repo clone. |
+| `ghlog check` | Verify git environment, repository status, and log repo access. |
+| `ghlog config --show` | Display current configuration settings. |
+
+---
 
 ## 📝 License
 
-This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

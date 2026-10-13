@@ -1,201 +1,104 @@
-# gh-graph-logger v2 — Python CLI Implementation Plan (v3)
+# Implementation Plan — Radical Simplification (Option A)
 
 ## Goal
-A Python CLI that you run by hand. There are no git hooks. It works like this:
-1. It checks that you are **inside a git repo** and **can push to the log repo**. If either check fails, it stops.
-2. `collect` gathers **your commits from today, up to now**, into a draft. The draft opens in **git's own editor**, the same one git opens for a merge commit, so you can remove anything confidential.
-3. After you save, it **asks for confirmation**. Only after you answer yes does it write `<project>/<YYYY-MM-DD_HH-MM-SS>.md` into a **local clone of the log repo** and run `git commit` and `git push`.
-4. Anyone can install it from PyPI with `pipx install gh-graph-logger`. It supports Python **3.10 – 3.14** and has **zero dependencies**.
+Radically simplify `gh-graph-logger` from an over-engineered 12-module system into a clean, minimal, and maintainable tool (~250 lines total) with zero runtime dependencies, supporting Python 3.10–3.14.
+
+---
+
+## What We Are Letting Go
+
+| Over-Engineered Component | Problem | Simplified Solution |
+|---|---|---|
+| **6 Disjoint Subcommands** (`init`, `check`, `collect`, `push`, `discard`, `config`) | Requires memorizing commands and managing persistent draft state (`[R]eopen / [O]verwrite / [C]ancel`). | **Single unified daily command (`ghlog`)**: collects commits, opens editor, prompts `Push? [y/N]`, and pushes in one smooth flow. |
+| **Custom TOML Fallback Parser** | 70+ lines of fallback parser written because Python 3.10 lacks `tomllib`. | **`config.json`**: Uses Python's native `json` module. Zero dependencies, identical across Python 3.10–3.14. |
+| **Delimited ASCII Log Parsing** | Unit (`\x1f`) & record (`\x1e`) separators, custom parsing, sorting, and manual bullet reconstruction. | **Native Git formatting**: `git log --reverse --since="midnight" --pretty=format:"- %h %s"` outputs clean Markdown bullets directly. |
+| **Windows Git Internal Path Probing** | Probing Git's private directories (`/usr/bin/vim.exe` vs `vi`) and environment hacking. | **Standard Editor resolution**: Use `$GIT_EDITOR` / `$EDITOR` with clean fallback to `notepad` (Windows) or `vim` (Unix). |
+| **Draft State Machine** | Managing persistent draft files, reopen/overwrite/cancel menus, `#` vs `##` stripping rules. | **Session draft**: A temporary draft file during the `ghlog` run. If emptied or declined, it is immediately discarded. |
+| **Local Config & First-Time Prompts** | Storing `ghlog.project` in local `.git/config` via interactive prompts. | **Default to folder name**: Project name is `Path.cwd().name`. Override anytime with `--project <name>`. |
+| **File Sprawl (12 Files)** | Micro-packages (`commands/`), console abstractions, custom exit codes. | **Consolidate to 3 files**: `cli.py`, `gitutil.py`, and `config.py`. |
+
+---
+
+## Simplified Workflow
 
 ```mermaid
-flowchart LR
-    A["ghlog init"] -->|git clone| H["log repo clone (path in config)"]
-    C["ghlog collect"] -->|"git log: today, by me"| D["draft in git-dir/ghlog/"]
-    D -->|"git var GIT_EDITOR"| E["editor"]
-    E --> Q{"Push? y/N/e"}
-    Q -->|N| K["draft kept"]
-    Q -->|e| E
-    Q -->|y| P["pull --rebase, write, commit, push"]
-    P --> R["GitHub, graph turns green"]
+flowchart TD
+    A["Run `ghlog` in any repo"] --> B{"Configured & in Git repo?"}
+    B -->|No| C["Print error & exit"]
+    B -->|Yes| D["Fetch today's commits via `git log`"]
+    D --> E{"Any commits?"}
+    E -->|No| F["Print 'No commits today' & exit"]
+    E -->|Yes| G["Open editor with commit draft"]
+    G --> H{"Saved file has commits?"}
+    H -->|Empty / Closed without changes| I["Print 'Cancelled' & exit"]
+    H -->|Has commits| J{"Prompt: Push N commits to log repo? [y/N]"}
+    J -->|N| K["Draft discarded. Exit."]
+    J -->|y| L["Write <project>/<timestamp>.md in log repo clone"]
+    L --> M["git pull --rebase && git add && git commit && git push"]
+    M --> N["Contribution graph updated!"]
 ```
 
-## Decisions so far
+---
 
-| Topic | Decision |
-|---|---|
-| How logs reach GitHub | A local clone of the log repo and plain `git`. No API calls and no token are stored |
-| Credentials | Whatever git login you already use (SSH, Git Credential Manager, `gh`) |
-| Dependencies | None. Only the Python standard library and the `git` binary |
-| Editor | Taken from `git var GIT_EDITOR`, which behaves like a merge-commit message |
-| Push | Always asks for confirmation first (`y/N/e`, default **No**). `--yes` skips the prompt for scripts |
-| Name | `gh-graph-logger`, with the alias `ghlog` |
-| Format | Markdown |
-| Commit date | Push time (one green square per push) |
-| Sync before writing | `git pull --rebase`, which keeps history linear. Unique file names mean it never conflicts |
-| Merge commits | Excluded (`--no-merges`) to avoid logging external or PR merge boilerplate |
-| Author matching | Fixed strings (`--fixed-strings --author=<email>`), supporting '+' addresses (GitHub noreply) |
-| Commit ordering | Oldest-first (`--reverse` and stable sort), preserving creation order for timestamp ties |
-| Revisions scanned | `--branches HEAD` including detached HEAD commits, deduped by hash |
-| Windows editor | Augments subprocess PATH with Git's `usr\bin` and maps bare `vi` to `vim` when `vi.exe` is absent |
-| Offline collect | `collect` works completely offline; checks local clone without requiring remote network access |
-| Comment stripping | Instruction comments starting with single `# ` are stripped; `## ` markdown headings are preserved |
-| Existing drafts | If draft exists, prompts `[R]eopen / [O]verwrite / [C]ancel` (default Reopen) |
+## Command Surface
+
+1. **`ghlog init`**
+   - Options: `--url <URL>`, `--email <EMAIL>`, `--root <DIR>` (default: `~/.gh-graph-logger`).
+   - Clones target repo and saves `~/.gh-graph-logger/config.json`.
+2. **`ghlog`** (Daily core command)
+   - Options: `--since <TIME>`, `--author <EMAIL>`, `--project <NAME>`, `--yes`.
+   - Runs the complete flow: grab commits $\rightarrow$ open editor $\rightarrow$ confirm $\rightarrow$ commit & push to log repo.
+3. **`ghlog check`**
+   - Quick verification that git is installed, you're in a repo, and log repo clone is accessible.
+4. **`ghlog config`**
+   - Displays the current configuration.
 
 ---
 
-## New points added
+## Proposed Code Structure
 
-### 1. Log-repo clone location and relocation
-- **Choosing the root directory:** `ghlog init` lets you choose the **root directory** where the log repo is cloned. The clone goes into `<root>/<repo-name>`.
-  - Interactive prompt: *"Root directory for the log repo [~/.gh-graph-logger]:"*. Press Enter to accept the default.
-  - Without the prompt: `ghlog init --root D:\logs`, which clones into `D:\logs\daily-commits`.
-  - `~` and environment variables are expanded, and the path is resolved to an absolute path.
-  - If the root doesn't exist, the tool asks whether to create it.
-  - If `<root>/<repo-name>` already exists:
-    - if it is a clone of the same repo, the tool reuses it;
-    - otherwise it stops and changes nothing.
-  - The tool checks that the root isn't inside one of your work repos, so the log repo is never nested inside a project.
-- **Saving the location:** the resulting clone path is saved in `~/.gh-graph-logger/config.toml`. This config file always stays in the same place, so the tool can find the clone wherever you put it.
-- Before every push, the tool **checks the clone**: the folder exists, it is a git repo, and its `origin` URL matches the config.
+Instead of 12 files across nested packages, the source tree becomes:
 
-| Situation | Behaviour |
-|---|---|
-| Valid clone | Normal push |
-| Folder missing | Stops with: *"Log repo not found at X. Run `ghlog init --path <new>` or run `ghlog init`."* |
-| `origin` URL doesn't match | Refuses to write anything, so logs never go to the wrong repo |
-
-### 2. Separate identity for the log repo
-- `ghlog init` asks for your **GitHub email**, meaning a verified email or your `noreply` address.
-- It sets `user.name` and `user.email` **only in the log repo clone**. Your work repos are not touched.
-- Reading commits uses the **author emails of each work repo** (see point 4). Writing log commits uses the **GitHub email**.
-
-### 3. Project name confirmation
-- The default is the repo's top-level folder name, turned into a slug. For example, `Payment Service` becomes `payment-service`.
-- The **first time** you run `collect` in a repo, it asks: *"Project name in the log repo [payment-service]:"*. Your answer is saved in that repo's local config as `ghlog.project`, so the question is never asked again.
-- Typical reasons to change it: to hide a client name with an alias, to keep apart two repos that share a folder name, or to keep a stable name when a folder is renamed.
-- `--project` overrides it for a single run.
-
-### 4. Edge cases across repos
-
-| Case | Handling |
-|---|---|
-| You committed with different emails in different repos | `git config ghlog.author` per repo (several emails, comma-separated). The default is that repo's `user.email`. `--author` works for a single run |
-| Rebased or amended old commits look like today's | Shown in the editor so you can delete them. The time window starts at **max(midnight, last push for this project)** |
-| Your own commits pulled from another machine | Only **local branches** are scanned (`--branches`, not `origin/*`). You review the list before pushing |
-| Worktrees and submodules | The draft path comes from `git rev-parse --git-dir`, never a hard-coded `.git/` |
-| Repo with no commits, or none today | Prints a friendly message and creates no file |
-| Git missing from PATH | `ghlog check` reports it clearly |
-| Commit messages that aren't UTF-8 | Decoded with replacement characters, so the tool never crashes |
-| Teammates' commits | Filtered out by author |
-
----
-
-## Commands (final)
-
-| Command | Purpose |
-|---|---|
-| `ghlog init [--root DIR] [--path P] [--url URL] [--email EMAIL] [--branch BRANCH] [--name NAME] [--yes]` | Configures the log repository. Prompts for URL, root directory (default `~/.gh-graph-logger`), and GitHub email if not passed via `--url`, `--root`, `--email`. `--root` clones under DIR; `--path` adopts an existing moved clone; `--yes` accepts defaults and auto-creates root. |
-| `ghlog check` | Shows ✅ or ❌ for git, inside a repo, the log repo clone, and remote access (`git ls-remote`) |
-| `ghlog collect [--since] [--author] [--full] [--project]` | Runs the checks, opens the draft in the editor, then asks for confirmation and pushes |
-| `ghlog push [--yes]` | Pushes an existing draft, with a confirmation prompt. Also retries log commits that weren't pushed |
-| `ghlog discard` | Deletes the draft |
-| `ghlog config --show` | Prints the config |
-
-Exit codes: `0` ok, `1` error, `2` usage error (argparse), `3` a check failed, `4` aborted by you.
-
----
-
-## Implementation Phases
-
-Each phase ends in a **working, tested state**. I'll stop after each phase so you can review it.
-
-```mermaid
-flowchart LR
-    P1["Phase 1: Skeleton"] --> P2["Phase 2: Checks and config"]
-    P2 --> P3["Phase 3: Collect and draft"]
-    P3 --> P4["Phase 4: Publish"]
-    P4 --> P5["Phase 5: Release"]
+```
+src/gh_graph_logger/
+├── __init__.py      # Version string
+├── gitutil.py       # Safe subprocess.run wrapper (~40 lines)
+├── config.py        # JSON config loader/saver (~40 lines)
+└── cli.py           # Parser, init, check, and the unified daily flow (~150 lines)
 ```
 
-### Phase 1: Project skeleton
-**Goal:** an installable package that does nothing yet.
-#### [NEW] pyproject.toml
-Uses hatchling, `requires-python >=3.10`, no dependencies, entry points `gh-graph-logger` and `ghlog`, and the dev extras `pytest` and `ruff`.
-#### [NEW] src/gh_graph_logger/__init__.py, cli.py
-`argparse` with all subcommands as stubs, plus `--version` and the exit codes.
-#### [NEW] src/gh_graph_logger/gitutil.py
-`run_git(args, cwd)`: runs git through `subprocess` with an argument list (never a shell), safe decoding and timeouts.
-#### [NEW] tests/conftest.py
-Fixtures that create temporary git repos and a bare "fake GitHub" remote.
-#### [NEW] .github/workflows/ci.yml
-Runs ruff and pytest on {Windows, macOS, Linux} × Python 3.10–3.14.
+### Module Responsibilities
 
-**Done when:** `pip install -e .[dev]` works, `ghlog --help` lists the commands, and CI is green.
+#### `gitutil.py`
+- `run_git(args, cwd=None, env=None, check=True)`: Clean `subprocess.run(["git", *args])`, UTF-8 decode with replacement, returns stdout.
+- `GitError`: Exception with returncode and stderr.
 
----
+#### `config.py`
+- `Config` dataclass: `log_repo_url`, `clone_path`, `branch`, `github_email`, `last_push`.
+- `load_config()`, `save_config(config)`: Simple, robust `json.dump` / `json.load` to `~/.gh-graph-logger/config.json`.
 
-### Phase 2: Checks and global config
-**Goal:** `ghlog init`, `ghlog check` and `ghlog config --show` work.
-#### [NEW] config.py
-Reads and writes `~/.gh-graph-logger/config.toml` (or `$GHLOG_HOME/config.toml`): repo URL, clone path, branch, GitHub email, and last push time per project. Uses standard library `tomllib` on Python 3.11+ and a lightweight zero-dependency parser fallback on Python 3.10; writes atomically via a built-in serializer.
-#### [NEW] guards.py
-`require_git()`, `require_git_repo()`, `require_log_repo()` (the clone checks from point 1) and `require_remote_access()` (`git ls-remote` with a timeout).
-#### [MODIFY] cli.py
-Implements `init` (prompts, choosing the root directory with `--root`, cloning, setting the local identity, `--path`, plus non-interactive testability flags `--url`, `--email`, `--branch`, `--name`, `--yes`), `check` and `config --show`.
-Strictly non-destructive: no directory deletions.
-
-**Done when:** tests pass for a missing repo, a moved clone, a mismatched URL, an unreachable remote, a custom `--root`, a root that doesn't exist yet, and a root that is inside a work repo.
-
----
-
-### Phase 3: Collect and draft
-**Goal:** `ghlog collect` opens the editor with the right commits. Nothing is pushed yet.
-#### [NEW] project.py
-Slug rules, the prompt shown on first use, and storage in `ghlog.project`.
-#### [NEW] collector.py
-Runs `git log --branches HEAD --no-merges --reverse --since=<max(midnight,last_push)> --fixed-strings --author=<emails>` with unit/record field separators (%x1f / %x1e), dedupes by hash, and sorts chronologically. Supports '+' in emails and detached HEAD.
-#### [NEW] draft.py
-Renders Markdown heading (`## <project> — <ts>`), commit bullets (`- HH:MM \`<hash>\` <subject>`) in local time, optional 2-space body indent (`--full`), and `# ` instructions. Strips single `# ` lines while strictly preserving `## ` headings. Counts commit bullets strictly at column 0. Resolves git editor, augments Windows PATH with Git's `usr\bin`, and maps bare `vi` to `vim`. Re-appends instructions when reopening existing drafts.
-#### [NEW] commands/ package, console.py, exitcodes.py
-Subcommands refactored into `commands/{init,check,collect,config}.py`. Shared terminal I/O moved to `console.py` and exit codes to `exitcodes.py`. `cli.py` serves as entry point and parser dispatcher with full backward-compatible exports.
-
-**Done when:** tests cover filtering by author (including '+' and multiple emails), worktrees, no commits today, a non-UTF-8 message, an empty draft, existing draft prompts, Windows editor PATH resolution, and end-to-end collect. You can try it by hand on your real repos, because nothing is pushed.
-
----
-
-### Phase 4: Publish
-**Goal:** the full flow from collect to confirm to push.
-#### [NEW] scanner.py
-Regex patterns for tokens, private keys, `password=` and similar. Any matches are shown in the confirmation prompt.
-#### [NEW] publisher.py
-Checks the clone, runs `pull --rebase`, writes `<project>/<ts>.md`, then `add`, `commit` and `push`. If the push fails, the commit is kept locally and retried on the next push. The last push time is updated only after a successful push.
-#### [MODIFY] cli.py
-The `y/N/e` prompt, `push`, `--yes` and `discard`.
-
-**Done when:** end-to-end tests against the bare remote cover two "machines" pushing in turn, an offline push followed by a retry, and the user answering N.
-
----
-
-### Phase 5: Docs and release
-#### [MODIFY] README.md
-Rewritten: install, `init`, the daily workflow, the email and green-square rules, privacy tips and troubleshooting.
-#### [MODIFY] .github/workflows/ci.yml
-Publishes to PyPI with Trusted Publishing when a `v*` tag is pushed.
-#### [NEW] CHANGELOG.md
-
-**Done when:** `pipx install gh-graph-logger` works from TestPyPI on Windows, macOS and Linux.
+#### `cli.py`
+- `init`: Clones the log repo, sets its `user.email` and `user.name`, saves `config.json`.
+- `check`: Tests git and verifies `config.json` and clone directory.
+- `run` (default `ghlog`): 
+  1. Checks current directory is a git repo.
+  2. Queries `git log --reverse --since="midnight" --pretty=format:"- %h %s"`.
+  3. Writes draft to `.git/ghlog_draft.md`.
+  4. Launches editor.
+  5. If content is empty or unchanged, deletes draft and exits.
+  6. Prompts `Push to log repo? [y/N]` (or auto-approves with `--yes`).
+  7. Copies file into `<log-repo>/<project>/<timestamp>.md`.
+  8. Runs `git pull --rebase`, `git add .`, `git commit -m "log: <project> <timestamp>"`, and `git push`.
+  9. Removes `.git/ghlog_draft.md`.
 
 ---
 
 ## Verification Plan
-### Automated (in every phase)
-```
-pip install -e .[dev]   # install the tool and dev tools in editable mode
-ruff check .            # static checks for bugs and style
-pytest -q               # tests in temp git repos with a fake local GitHub
-```
-### Manual (after Phase 4)
-1. Run `ghlog check` outside a repo → ❌. Move the clone → a clear relocation message.
-2. Run `ghlog collect` in a work repo → it asks for the project name once, then your editor opens.
-3. Delete a line, save, answer **N** → nothing is pushed. Run `ghlog push` and answer **y** → the file appears on GitHub and the square turns green.
-4. Run `collect` again → only new commits are listed.
+
+### Automated Tests
+- Test configuration saving and loading (`config.json`).
+- Test `git log` generation with multiple commits.
+- Test `init` cloning into custom root directories.
+- Test full run: commits generated $\rightarrow$ editor saves $\rightarrow$ pushed to bare remote.
+- Test cancellation: user saves empty file $\rightarrow$ no push occurs.
+- Run `ruff check .` and `pytest -v`.
