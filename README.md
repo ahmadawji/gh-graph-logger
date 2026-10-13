@@ -1,6 +1,6 @@
 # gh-graph-logger 🟩
 
-A zero-dependency Python CLI tool to easily log your daily commits to a private GitHub repository and keep your contribution graph active.
+A zero-dependency Python CLI tool to easily log your daily commits to a GitHub repository and keep your contribution graph active.
 
 > Keep your GitHub contribution graph active even when working on private client repositories, enterprise Git instances, or offline repositories.
 
@@ -31,7 +31,7 @@ This installs both `ghlog` and `gh-graph-logger` CLI commands.
 
 ### 1. Initialize Log Repository
 
-Create a private repository on GitHub (e.g. `daily-log`) and run:
+Create a repository on GitHub (e.g. `daily-log`) and run:
 
 ```bash
 ghlog init --url git@github.com:yourusername/daily-log.git --email your-github@email.com
