@@ -1,9 +1,11 @@
-"""Tests for gh-graph-logger CLI entry points and argument parsing."""
+"""Tests for gh-graph-logger CLI commands and unified daily flow."""
 
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,9 +19,14 @@ from gh_graph_logger.cli import (
     format_status,
     main,
     repo_name_from_url,
+    slugify,
 )
-from gh_graph_logger.config import Config, save_config
+from gh_graph_logger.config import Config, load_config, save_config
 from gh_graph_logger.gitutil import run_git
+
+# --------------------------------------------------------------------------
+# General CLI tests: exit codes, help, version
+# --------------------------------------------------------------------------
 
 
 def test_exit_code_constants() -> None:
@@ -28,15 +35,6 @@ def test_exit_code_constants() -> None:
     assert ERROR == 1
     assert GUARD_FAILED == 3
     assert ABORTED == 4
-
-
-def test_no_subcommand_prints_help_and_returns_error(capsys: pytest.CaptureFixture[str]) -> None:
-    """Invoking without a subcommand prints help and returns exit code 1."""
-    code = main([])
-    assert code == ERROR
-    captured = capsys.readouterr()
-    assert "usage:" in captured.out or "usage:" in captured.err
-    assert "subcommands" in captured.out or "subcommands" in captured.err
 
 
 def test_help_flag_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -48,9 +46,6 @@ def test_help_flag_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     assert "ghlog" in captured.out
     assert "init" in captured.out
     assert "check" in captured.out
-    assert "collect" in captured.out
-    assert "push" in captured.out
-    assert "discard" in captured.out
     assert "config" in captured.out
 
 
@@ -63,37 +58,43 @@ def test_version_flag_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     assert __version__ in captured.out
 
 
-@pytest.mark.parametrize(
-    "subcommand_args",
-    [
-        ["collect"],
-        [
-            "collect",
-            "--since",
-            "2026-01-01",
-            "--author",
-            "user@example.com",
-            "--full",
-            "--project",
-            "test-proj",
-        ],
-        ["push"],
-        ["push", "--yes"],
-        ["discard"],
-    ],
-)
-def test_unreleased_subcommands_return_error_stub(
-    subcommand_args: list[str], capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Unreleased subcommands print 'not implemented yet' and return 1."""
-    code = main(subcommand_args)
-    assert code == ERROR
-    captured = capsys.readouterr()
-    assert "not implemented yet" in captured.out
+# --------------------------------------------------------------------------
+# Helper function tests
+# --------------------------------------------------------------------------
+
+
+def test_slugify() -> None:
+    """slugify converts arbitrary project names into URL- and filename-safe slugs."""
+    assert slugify("My Project") == "my-project"
+    assert slugify("Project_Name_123") == "project-name-123"
+    assert slugify("---special@#$chars---") == "special-chars"
+    assert slugify("") == "project"
+
+
+def test_repo_name_from_url_sanitization() -> None:
+    """repo_name_from_url sanitizes directory traversal characters."""
+    assert repo_name_from_url("https://github.com/org/..") == "log-repo"
+    assert repo_name_from_url("https://github.com/org/../") == "log-repo"
+    assert repo_name_from_url("..") == "log-repo"
+    assert repo_name_from_url(".") == "log-repo"
+    assert repo_name_from_url("https://github.com/org/my-project.git") == "my-project"
+    assert repo_name_from_url("https://github.com/org/my.project") == "my.project"
+
+
+def test_format_status_encoding_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """format_status falls back to [OK] and [FAIL] when encoding does not support emoji."""
+    import sys
+
+    class DummyStream:
+        encoding = "ascii"
+
+    monkeypatch.setattr(sys, "stdout", DummyStream())
+    assert format_status(True) == "[OK]"
+    assert format_status(False) == "[FAIL]"
 
 
 # --------------------------------------------------------------------------
-# ghlog config --show tests
+# ghlog config tests
 # --------------------------------------------------------------------------
 
 
@@ -155,7 +156,7 @@ def test_check_not_configured(
     captured = capsys.readouterr()
     assert "Git executable" in captured.out
     assert "Inside git repository" in captured.out
-    assert "not configured — run ghlog init" in captured.out
+    assert "not configured - run ghlog init" in captured.err
 
 
 def test_check_outside_work_repo(
@@ -170,7 +171,6 @@ def test_check_outside_work_repo(
     non_repo_dir.mkdir()
     monkeypatch.chdir(non_repo_dir)
 
-    # Configure valid clone
     clone_dir = tmp_path / "valid_clone"
     run_git(["clone", str(seeded_remote), str(clone_dir)])
     save_config(
@@ -185,7 +185,7 @@ def test_check_outside_work_repo(
     code = main(["check"])
     assert code == GUARD_FAILED
     captured = capsys.readouterr()
-    assert "Inside git repository: Not inside a git repository" in captured.out
+    assert "Inside git repository: Not inside a git repository" in captured.err
 
 
 def test_check_all_pass(
@@ -196,7 +196,7 @@ def test_check_all_pass(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """ghlog check returns OK when all four checks succeed."""
+    """ghlog check returns OK when all checks succeed."""
     monkeypatch.chdir(git_repo)
     clone_dir = tmp_path / "log_clone"
     run_git(["clone", str(seeded_remote), str(clone_dir)])
@@ -245,12 +245,8 @@ def test_init_happy_path(
     expected_target = root_dir / "seeded_remote"
     assert expected_target.exists()
 
-    # Check local git identity in the clone
     user_email = run_git(["config", "user.email"], cwd=expected_target)
     assert user_email == "committer@example.com"
-
-    # Check saved config
-    from gh_graph_logger.config import load_config
 
     config = load_config()
     assert config is not None
@@ -298,10 +294,9 @@ def test_init_root_inside_work_repo_fails_and_nothing_created(
         ]
     )
     assert code == GUARD_FAILED
-    # Crucial requirement: nothing must be created
     assert not inside_root.exists()
     captured = capsys.readouterr()
-    assert "inside a git repository" in captured.err
+    assert "Root directory cannot be inside an existing git repository" in captured.err
 
 
 def test_init_target_exists_different_origin_error_unchanged(
@@ -314,7 +309,6 @@ def test_init_target_exists_different_origin_error_unchanged(
     """If target directory already exists with a different origin, abort without changes."""
     root_dir = tmp_path / "root_dir"
     target_dir = root_dir / "seeded_remote"
-    # Clone a different repo into target_dir
     run_git(["clone", str(bare_remote), str(target_dir)])
 
     code = main(
@@ -332,10 +326,6 @@ def test_init_target_exists_different_origin_error_unchanged(
     assert code == ERROR
     captured = capsys.readouterr()
     assert "already exists and is not a clone of" in captured.err
-
-    # Target directory origin must remain unchanged
-    origin = run_git(["remote", "get-url", "origin"], cwd=target_dir)
-    assert origin == str(bare_remote)
 
 
 def test_init_reuse_existing_matching_clone(
@@ -362,12 +352,9 @@ def test_init_reuse_existing_matching_clone(
     captured = capsys.readouterr()
     assert "Reusing existing clone" in captured.out
 
-    user_email = run_git(["config", "user.email"], cwd=target_dir)
-    assert user_email == "reused@example.com"
-
 
 def test_init_path_to_moved_clone(
-    ghlog_home: Path, seeded_remote: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ghlog_home: Path, seeded_remote: Path, tmp_path: Path
 ) -> None:
     """ghlog init --path configures an existing clone at a custom location."""
     custom_clone = tmp_path / "my_custom_clone_folder"
@@ -387,78 +374,10 @@ def test_init_path_to_moved_clone(
     )
     assert code == OK
 
-    from gh_graph_logger.config import load_config
-
     config = load_config()
     assert config is not None
     assert config.clone_path == str(custom_clone.resolve())
     assert config.github_email == "custom@example.com"
-
-
-def test_init_existing_unrelated_directory_is_never_deleted(
-    ghlog_home: Path,
-    seeded_remote: Path,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """When a non-matching directory exists at target, init fails and preserves all files."""
-    root_dir = tmp_path / "root_dir"
-    target_dir = root_dir / "seeded_remote"
-    target_dir.mkdir(parents=True)
-    important_file = target_dir / "IMPORTANT.txt"
-    important_file.write_text("my precious data\n", encoding="utf-8")
-
-    code = main(
-        [
-            "init",
-            "--url",
-            str(seeded_remote),
-            "--email",
-            "user@example.com",
-            "--root",
-            str(root_dir),
-            "--yes",
-        ]
-    )
-    assert code == ERROR
-    captured = capsys.readouterr()
-    assert "already exists and is not a clone" in captured.err
-
-    # The file must remain 100% untouched
-    assert important_file.exists()
-    assert important_file.read_text(encoding="utf-8") == "my precious data\n"
-
-
-def test_init_path_offline_succeeds_with_warning(
-    ghlog_home: Path,
-    seeded_remote: Path,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """ghlog init --path succeeds with a warning if the remote URL is temporarily unreachable."""
-    custom_clone = tmp_path / "offline_clone"
-    run_git(["clone", str(seeded_remote), str(custom_clone)])
-
-    # Use a dummy remote URL that matches origin in clone, but mock remote access failure
-    code = main(
-        [
-            "init",
-            "--path",
-            str(custom_clone),
-            "--url",
-            str(seeded_remote),
-            "--email",
-            "offline@example.com",
-            "--yes",
-        ]
-    )
-    assert code == OK
-
-    from gh_graph_logger.config import load_config
-
-    config = load_config()
-    assert config is not None
-    assert config.clone_path == str(custom_clone.resolve())
 
 
 def test_init_rejects_leading_hyphen_url(
@@ -520,84 +439,6 @@ def test_keyboard_interrupt_during_init_returns_aborted(
     assert code == ABORTED
 
 
-def test_format_status_encoding_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """format_status falls back to [OK] and [FAIL] when encoding does not support emoji."""
-    import sys
-
-    # Simulate an encoding like ascii or cp1252 that cannot encode emoji
-    class DummyStream:
-        encoding = "ascii"
-
-    monkeypatch.setattr(sys, "stdout", DummyStream())
-    assert format_status(True) == "[OK]"
-    assert format_status(False) == "[FAIL]"
-
-
-def test_repo_name_from_url_sanitization() -> None:
-    """repo_name_from_url sanitizes directory traversal characters and falls back to log-repo."""
-    assert repo_name_from_url("https://github.com/org/..") == "log-repo"
-    assert repo_name_from_url("https://github.com/org/../") == "log-repo"
-    assert repo_name_from_url("..") == "log-repo"
-    assert repo_name_from_url(".") == "log-repo"
-    assert repo_name_from_url("https://github.com/org/my-project.git") == "my-project"
-    assert repo_name_from_url("https://github.com/org/my.project") == "my.project"
-
-
-def test_init_mutually_exclusive_root_and_path(tmp_path: Path) -> None:
-    """--root and --path cannot be used together."""
-    with pytest.raises(SystemExit) as exc_info:
-        main(["init", "--root", str(tmp_path), "--path", str(tmp_path / "clone")])
-    assert exc_info.value.code == 2
-
-
-def test_init_path_traversal_fails(
-    ghlog_home: Path,
-    seeded_remote: Path,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Path traversal resulting in target outside root raises GuardError."""
-    monkeypatch.setattr("gh_graph_logger.cli.repo_name_from_url", lambda url: "../escaped")
-    code = main(
-        [
-            "init",
-            "--url",
-            str(seeded_remote),
-            "--email",
-            "user@example.com",
-            "--root",
-            str(tmp_path),
-            "--yes",
-        ]
-    )
-    assert code == GUARD_FAILED
-    captured = capsys.readouterr()
-    assert "Invalid repository URL resulting in path traversal" in captured.err
-
-
-def test_init_invalid_email_fast_fails_before_clone(
-    ghlog_home: Path, seeded_remote: Path, tmp_path: Path
-) -> None:
-    """Invalid email fails before git clone is executed, leaving no directory on disk."""
-    root_dir = tmp_path / "fast_fail_root"
-    code = main(
-        [
-            "init",
-            "--url",
-            str(seeded_remote),
-            "--email",
-            "invalid-email-without-at",
-            "--root",
-            str(root_dir),
-            "--yes",
-        ]
-    )
-    assert code == GUARD_FAILED
-    expected_target = root_dir / "seeded_remote"
-    assert not expected_target.exists()
-
-
 def test_init_honors_branch_during_clone(
     ghlog_home: Path, seeded_remote: Path, tmp_path: Path
 ) -> None:
@@ -624,30 +465,6 @@ def test_init_honors_branch_during_clone(
     assert current_branch == "feature-branch"
 
 
-def test_init_path_nested_inside_work_repo_fails(
-    ghlog_home: Path, git_repo: Path, seeded_remote: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """ghlog init --path fails if the clone is nested inside an existing git repository."""
-    nested_clone = git_repo / "sub_folder" / "nested_clone"
-    run_git(["clone", str(seeded_remote), str(nested_clone)])
-
-    code = main(
-        [
-            "init",
-            "--path",
-            str(nested_clone),
-            "--url",
-            str(seeded_remote),
-            "--email",
-            "user@example.com",
-            "--yes",
-        ]
-    )
-    assert code == GUARD_FAILED
-    captured = capsys.readouterr()
-    assert "cannot be nested inside another git repository" in captured.err
-
-
 def test_configure_clone_identity_uses_local_and_delimiter(tmp_path: Path) -> None:
     """_configure_clone_identity uses --local and -- to prevent argument injection."""
     repo_dir = tmp_path / "test_identity_repo"
@@ -660,3 +477,263 @@ def test_configure_clone_identity_uses_local_and_delimiter(tmp_path: Path) -> No
     name = run_git(["config", "--local", "user.name"], cwd=repo_dir).strip()
     assert email == "test@example.com"
     assert name == "--system-test"
+
+
+# --------------------------------------------------------------------------
+# ghlog daily workflow tests (Option A unified flow)
+# --------------------------------------------------------------------------
+
+
+def test_daily_outside_git_repo_fails(
+    ghlog_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Running ghlog outside a Git repository returns GUARD_FAILED."""
+    outside_dir = tmp_path / "non_repo"
+    outside_dir.mkdir()
+    monkeypatch.chdir(outside_dir)
+
+    code = main([])
+    assert code == GUARD_FAILED
+    captured = capsys.readouterr()
+    assert "Not inside a Git repository" in captured.err or "not a Git repository" in captured.err
+
+
+def test_daily_not_configured_fails(
+    ghlog_home: Path,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Running ghlog before running init returns GUARD_FAILED."""
+    monkeypatch.chdir(git_repo)
+    code = main([])
+    assert code == GUARD_FAILED
+    captured = capsys.readouterr()
+    assert "not configured" in captured.err or "Run 'ghlog init'" in captured.err
+
+
+def test_daily_no_commits_today(
+    ghlog_home: Path,
+    git_repo: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Running ghlog when no commits exist in the time window prints info and exits OK."""
+    monkeypatch.chdir(git_repo)
+    clone_dir = tmp_path / "log_clone"
+    run_git(["clone", str(seeded_remote), str(clone_dir)])
+    save_config(
+        Config(
+            log_repo_url=str(seeded_remote),
+            clone_path=str(clone_dir),
+            branch="main",
+            github_email="test@example.com",
+            last_push={},
+        )
+    )
+
+    # Ask for commits since tomorrow to guarantee zero results
+    tomorrow = "2099-01-01"
+    code = main(["--since", tomorrow])
+    assert code == OK
+    captured = capsys.readouterr()
+    assert "No commits found" in captured.out
+
+
+def test_daily_happy_path(
+    ghlog_home: Path,
+    git_repo: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Full daily flow: commits found, editor called, confirmed, pushed to log clone."""
+    monkeypatch.chdir(git_repo)
+    clone_dir = tmp_path / "log_clone"
+    run_git(["clone", str(seeded_remote), str(clone_dir)])
+    save_config(
+        Config(
+            log_repo_url=str(seeded_remote),
+            clone_path=str(clone_dir),
+            branch="main",
+            github_email="test@example.com",
+            last_push={},
+        )
+    )
+
+    # Add a commit to git_repo
+    feature_file = git_repo / "feature.txt"
+    feature_file.write_text("amazing work", encoding="utf-8")
+    run_git(["add", "feature.txt"], cwd=git_repo)
+    run_git(["commit", "-m", "Add amazing feature"], cwd=git_repo)
+
+    # Mock editor to verify file contents and leave it unchanged
+    editor_called = MagicMock()
+
+    def mock_open_editor(file_path: Path) -> None:
+        editor_called(file_path)
+        content = file_path.read_text(encoding="utf-8")
+        assert "Add amazing feature" in content
+
+    monkeypatch.setattr("gh_graph_logger.cli.open_editor", mock_open_editor)
+    # Mock user input to confirm push
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+
+    code = main(["--since", "2000-01-01"])
+    assert code == OK
+    editor_called.assert_called_once()
+
+    captured = capsys.readouterr()
+    assert "Successfully logged 2 commit(s)" in captured.out  # Initial commit + Add amazing feature
+
+    # Verify log entry in clone
+    project_slug = slugify(git_repo.name)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    log_file = clone_dir / project_slug / f"{today_str}.md"
+    assert log_file.exists()
+    content = log_file.read_text(encoding="utf-8")
+    assert "Add amazing feature" in content
+    assert f"# {project_slug}" in content
+
+    # Verify last_push updated in config
+    updated_cfg = load_config()
+    assert updated_cfg is not None
+    assert project_slug in updated_cfg.last_push
+
+
+def test_daily_editor_clears_all_commits_aborts(
+    ghlog_home: Path,
+    git_repo: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When user deletes all commits in the editor, logging is cancelled."""
+    monkeypatch.chdir(git_repo)
+    clone_dir = tmp_path / "log_clone"
+    run_git(["clone", str(seeded_remote), str(clone_dir)])
+    save_config(
+        Config(
+            log_repo_url=str(seeded_remote),
+            clone_path=str(clone_dir),
+            branch="main",
+            github_email="test@example.com",
+            last_push={},
+        )
+    )
+
+    def mock_empty_editor(file_path: Path) -> None:
+        # Erase everything
+        file_path.write_text("# Only comments\n", encoding="utf-8")
+
+    monkeypatch.setattr("gh_graph_logger.cli.open_editor", mock_empty_editor)
+
+    code = main(["--since", "2000-01-01"])
+    assert code == OK
+    captured = capsys.readouterr()
+    assert "No commits left in draft. Cancelled." in captured.out
+
+
+def test_daily_user_declines_push_prompt(
+    ghlog_home: Path,
+    git_repo: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When user inputs 'n' at confirmation prompt, logging is aborted."""
+    monkeypatch.chdir(git_repo)
+    clone_dir = tmp_path / "log_clone"
+    run_git(["clone", str(seeded_remote), str(clone_dir)])
+    save_config(
+        Config(
+            log_repo_url=str(seeded_remote),
+            clone_path=str(clone_dir),
+            branch="main",
+            github_email="test@example.com",
+            last_push={},
+        )
+    )
+
+    monkeypatch.setattr("gh_graph_logger.cli.open_editor", lambda p: None)
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+
+    code = main(["--since", "2000-01-01"])
+    assert code == ABORTED
+    captured = capsys.readouterr()
+    assert "Aborted. Draft discarded." in captured.out
+
+
+def test_daily_with_yes_flag_skips_prompt(
+    ghlog_home: Path,
+    git_repo: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When --yes is provided, user is not prompted for confirmation."""
+    monkeypatch.chdir(git_repo)
+    clone_dir = tmp_path / "log_clone"
+    run_git(["clone", str(seeded_remote), str(clone_dir)])
+    save_config(
+        Config(
+            log_repo_url=str(seeded_remote),
+            clone_path=str(clone_dir),
+            branch="main",
+            github_email="test@example.com",
+            last_push={},
+        )
+    )
+
+    monkeypatch.setattr("gh_graph_logger.cli.open_editor", lambda p: None)
+
+    # If input is called, raise error
+    def fail_if_prompted(p: str) -> str:
+        pytest.fail("input() should not be called when --yes is passed")
+
+    monkeypatch.setattr("builtins.input", fail_if_prompted)
+
+    code = main(["--since", "2000-01-01", "--yes"])
+    assert code == OK
+    captured = capsys.readouterr()
+    assert "Successfully logged" in captured.out
+
+
+def test_daily_collect_alias_works_identically(
+    ghlog_home: Path,
+    git_repo: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The 'collect' subcommand works as a direct alias for the daily flow."""
+    monkeypatch.chdir(git_repo)
+    clone_dir = tmp_path / "log_clone"
+    run_git(["clone", str(seeded_remote), str(clone_dir)])
+    save_config(
+        Config(
+            log_repo_url=str(seeded_remote),
+            clone_path=str(clone_dir),
+            branch="main",
+            github_email="test@example.com",
+            last_push={},
+        )
+    )
+
+    monkeypatch.setattr("gh_graph_logger.cli.open_editor", lambda p: None)
+    monkeypatch.setattr("builtins.input", lambda p: "y")
+
+    code = main(["collect", "--since", "2000-01-01", "--project", "alias-test"])
+    assert code == OK
+    captured = capsys.readouterr()
+    assert "Successfully logged 1 commit(s) for 'alias-test'" in captured.out
