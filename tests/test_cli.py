@@ -66,17 +66,6 @@ def test_version_flag_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
 @pytest.mark.parametrize(
     "subcommand_args",
     [
-        ["collect"],
-        [
-            "collect",
-            "--since",
-            "2026-01-01",
-            "--author",
-            "user@example.com",
-            "--full",
-            "--project",
-            "test-proj",
-        ],
         ["push"],
         ["push", "--yes"],
         ["discard"],

@@ -32,6 +32,10 @@ flowchart LR
 | Format | Markdown |
 | Commit date | Push time (one green square per push) |
 | Sync before writing | `git pull --rebase`, which keeps history linear. Unique file names mean it never conflicts |
+| Merge commits | Excluded (`--no-merges`) to avoid logging external or PR merge boilerplate |
+| Offline collect | `collect` works completely offline; checks local clone without requiring remote network access |
+| Comment stripping | Instruction comments starting with single `# ` are stripped; `## ` markdown headings are preserved |
+| Existing drafts | If draft exists, prompts `[R]eopen / [O]verwrite / [C]ancel` (default Reopen) |
 
 ---
 
@@ -145,11 +149,13 @@ Strictly non-destructive: no directory deletions.
 #### [NEW] project.py
 Slug rules, the prompt shown on first use, and storage in `ghlog.project`.
 #### [NEW] collector.py
-Runs `git log --branches --since=<max(midnight,last_push)> --author=<emails>` with a field-separated format, removes duplicates by hash, and sorts by time.
+Runs `git log --branches --no-merges --since=<max(midnight,last_push)> --author=<emails>` with unit/record field separators (%x1f / %x1e), regex email escaping and anchoring (`--author=<email>`), dedupes by hash, and sorts ascending by time. Excludes merge commits.
 #### [NEW] draft.py
-Renders the Markdown and `#` instructions, writes the draft to `<git-dir>/ghlog/draft.md`, opens `git var GIT_EDITOR`, and removes comment lines. An empty result aborts.
+Renders Markdown heading (`## <project> — <ts>`), commit bullets (`- HH:MM \`<hash>\` <subject>`), optional 2-space body indent (`--full`), and `# ` instructions. Strips lines starting with single `#` while strictly keeping `##` headings. Writes draft to `<git-dir>/ghlog/draft.md` (supporting worktrees and submodules) and opens `git var GIT_EDITOR`. If a draft already exists, prompts `[R]eopen / [O]verwrite / [C]ancel`.
+#### [MODIFY] cli.py
+Implements `ghlog collect` with offline-friendly guard checks (`require_git`, `require_git_repo`, `require_log_repo`), commit collection, editor opening, comment stripping, empty draft abort/discard, and saved draft summary. Exit codes: 0 ok, 3 guard failed, 4 aborted. Keep `push` and `discard` as stubs.
 
-**Done when:** tests cover filtering by author, worktrees, no commits today, a non-UTF-8 message and an empty draft. You can try it by hand on your real repos, because nothing is pushed.
+**Done when:** tests cover filtering by author, worktrees, no commits today, a non-UTF-8 message, an empty draft, existing draft prompts, and end-to-end collect. You can try it by hand on your real repos, because nothing is pushed.
 
 ---
 

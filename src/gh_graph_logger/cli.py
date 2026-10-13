@@ -6,10 +6,17 @@ import argparse
 import os
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from gh_graph_logger import __version__
+from gh_graph_logger import __version__, draft
+from gh_graph_logger.collector import (
+    collect_commits,
+    compute_window_start,
+    parse_since,
+    resolve_author_emails,
+)
 from gh_graph_logger.config import (
     Config,
     ConfigError,
@@ -27,6 +34,7 @@ from gh_graph_logger.guards import (
     require_log_repo,
     require_remote_access,
 )
+from gh_graph_logger.project import resolve_project_name
 
 # Exit code constants
 OK: int = 0
@@ -513,6 +521,108 @@ def handle_config(arguments: argparse.Namespace) -> int:
     return OK
 
 
+def handle_collect(arguments: argparse.Namespace) -> int:
+    """Collect commits from current repository and open a draft in git editor."""
+    require_git()
+    repo_root = require_git_repo()
+
+    loaded_configuration = load_config()
+    if loaded_configuration is None:
+        raise GuardError(
+            "gh-graph-logger is not configured.",
+            hint="Run 'ghlog init' to configure your log repository.",
+        )
+
+    require_log_repo(loaded_configuration)
+
+    since_override: datetime | None = None
+    if arguments.since:
+        try:
+            since_override = parse_since(arguments.since)
+        except ValueError as exception:
+            safe_print(f"Error: {exception}", file=sys.stderr)
+            return ERROR
+
+    project_name = resolve_project_name(repo_root, override=arguments.project)
+    now = datetime.now().astimezone()
+    window_start = compute_window_start(
+        project=project_name,
+        last_push=loaded_configuration.last_push,
+        now=now,
+        since_override=since_override,
+    )
+    author_emails = resolve_author_emails(repo_root, override=arguments.author)
+
+    target_draft_path = draft.draft_path(repo_root)
+    reopen_existing_draft = False
+
+    if target_draft_path.exists() and target_draft_path.stat().st_size > 0:
+        existing_draft_text = target_draft_path.read_text(encoding="utf-8")
+        existing_commits_count = sum(
+            1 for line in existing_draft_text.splitlines() if line.strip().startswith("- ")
+        )
+        while True:
+            choice = prompt(
+                f"A draft already exists ({existing_commits_count} commits). "
+                "[R]eopen it / [O]verwrite with fresh commits / [C]ancel",
+                default="R",
+            ).strip().lower()
+            if choice in ("r", "reopen", ""):
+                reopen_existing_draft = True
+                break
+            if choice in ("o", "overwrite"):
+                reopen_existing_draft = False
+                break
+            if choice in ("c", "cancel"):
+                safe_print("Aborted by user.")
+                return ABORTED
+            safe_print("Please enter 'r' to reopen, 'o' to overwrite, or 'c' to cancel.")
+
+    if not reopen_existing_draft:
+        commits = collect_commits(
+            repo_root=repo_root,
+            since=window_start,
+            until=now,
+            author_emails=author_emails,
+            include_body=arguments.full,
+        )
+        if not commits:
+            authors_display = ", ".join(author_emails)
+            safe_print(
+                f"No commits found since {window_start} for {authors_display}. "
+                "Nothing to log."
+            )
+            return OK
+
+        rendered_draft = draft.render_draft(
+            project=project_name,
+            commits=commits,
+            generated_at=now,
+            include_body=arguments.full,
+        )
+        target_draft_path.write_text(rendered_draft, encoding="utf-8", newline="\n")
+
+    draft.open_editor(repo_root, target_draft_path)
+
+    edited_content = target_draft_path.read_text(encoding="utf-8")
+    cleaned_content = draft.strip_comments(edited_content)
+
+    if not draft.has_commits(cleaned_content):
+        target_draft_path.unlink(missing_ok=True)
+        safe_print("Nothing to log - draft discarded.")
+        return ABORTED
+
+    target_draft_path.write_text(cleaned_content + "\n", encoding="utf-8", newline="\n")
+    saved_commits_count = sum(
+        1 for line in cleaned_content.splitlines() if line.strip().startswith("- ")
+    )
+    safe_print(
+        f"Draft saved to {target_draft_path} with {saved_commits_count} commits. "
+        "Publishing arrives in the next phase."
+    )
+    return OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build and configure the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -573,7 +683,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser_collect.add_argument("--author", type=str, help="Author email(s) to filter by")
     parser_collect.add_argument("--full", action="store_true", help="Include full commit messages")
     parser_collect.add_argument("--project", type=str, help="Project name override")
-    parser_collect.set_defaults(func=_stub)
+    parser_collect.set_defaults(func=handle_collect)
 
     # push
     parser_push = subparsers.add_parser(
