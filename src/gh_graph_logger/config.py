@@ -45,9 +45,18 @@ def load_config() -> Config | None:
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ConfigError(f"Configuration file at '{path}' must be a JSON object.")
+        log_repo_url = data.get("log_repo_url")
+        clone_path = data.get("clone_path")
+        if not isinstance(log_repo_url, str) or not log_repo_url.strip():
+            raise ConfigError(f"Invalid or empty 'log_repo_url' in '{path}'.")
+        if not isinstance(clone_path, str) or not clone_path.strip():
+            raise ConfigError(f"Invalid or empty 'clone_path' in '{path}'.")
+
         return Config(
-            log_repo_url=data["log_repo_url"],
-            clone_path=str(Path(data["clone_path"]).resolve()),
+            log_repo_url=log_repo_url.strip(),
+            clone_path=str(Path(clone_path).resolve()),
             branch=data.get("branch", "main"),
             github_email=data.get("github_email", ""),
             last_push=data.get("last_push", {}),

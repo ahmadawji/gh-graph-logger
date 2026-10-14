@@ -71,6 +71,9 @@ def test_config_directory_as_target_raises_error(ghlog_home: Path) -> None:
         "12345",
         '{"log_repo_url": 123}',
         '{"clone_path": "/some/path"}',  # missing log_repo_url
+        '{"log_repo_url": "", "clone_path": "/some/path"}',  # empty log_repo_url
+        '{"log_repo_url": "https://github.com/u/r", "clone_path": ""}',  # empty clone_path
+        '{"log_repo_url": "   ", "clone_path": "   "}',  # whitespace only
     ],
 )
 def test_load_config_corrupt_content_raises_config_error(

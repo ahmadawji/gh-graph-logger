@@ -37,11 +37,13 @@ __all__ = [
     "_configure_clone_identity",
     "build_parser",
     "format_status",
+    "get_editor",
     "handle_check",
     "handle_config",
     "handle_daily",
     "handle_init",
     "main",
+    "normalize_url",
     "open_editor",
     "repo_name_from_url",
     "safe_print",
@@ -117,10 +119,14 @@ def slugify(name: str) -> str:
 
 
 def normalize_url(url: str) -> str:
-    """Normalize a git URL for comparison."""
-    cleaned = url.strip().rstrip("/")
-    if cleaned.endswith(".git"):
+    """Normalize a git URL or local path for comparison."""
+    cleaned = url.strip().replace("\\", "/").rstrip("/")
+    if cleaned.lower().endswith(".git"):
         cleaned = cleaned[:-4]
+    for prefix in ("git@github.com:", "ssh://git@github.com/", "http://github.com/"):
+        if cleaned.lower().startswith(prefix.lower()):
+            cleaned = "https://github.com/" + cleaned[len(prefix) :]
+            break
     return cleaned.lower()
 
 
@@ -136,7 +142,8 @@ def get_editor() -> list[str]:
             pass
     if not editor:
         editor = "notepad" if os.name == "nt" else "vim"
-    return shlex.split(editor, posix=(os.name != "nt"))
+    tokens = shlex.split(editor, posix=(os.name != "nt"))
+    return [token.strip("\"'") for token in tokens]
 
 
 def open_editor(file_path: Path) -> None:
@@ -171,6 +178,9 @@ def handle_init(args: argparse.Namespace) -> int:
     if url.startswith("-"):
         safe_print("Error: URLs starting with '-' are not permitted.", file=sys.stderr)
         return GUARD_FAILED
+    if url.lower().startswith(("ext::", "fd::")):
+        safe_print("Error: Dangerous or unsupported git protocol in URL.", file=sys.stderr)
+        return GUARD_FAILED
 
     if not url and not args.path:
         if args.yes:
@@ -182,6 +192,9 @@ def handle_init(args: argparse.Namespace) -> int:
             return ERROR
         if url.startswith("-"):
             safe_print("Error: URLs starting with '-' are not permitted.", file=sys.stderr)
+            return GUARD_FAILED
+        if url.lower().startswith(("ext::", "fd::")):
+            safe_print("Error: Dangerous or unsupported git protocol in URL.", file=sys.stderr)
             return GUARD_FAILED
 
     email = args.email or ""
@@ -207,6 +220,12 @@ def handle_init(args: argparse.Namespace) -> int:
         if not clone_path.exists() or not is_git_repo(clone_path):
             safe_print(
                 f"Error: Path '{clone_path}' is not an existing Git repository.",
+                file=sys.stderr,
+            )
+            return ERROR
+        if get_repo_root(clone_path) != clone_path:
+            safe_print(
+                f"Error: Specified path '{clone_path}' is not the root of a git repository.",
                 file=sys.stderr,
             )
             return ERROR
@@ -336,11 +355,21 @@ def handle_check(args: argparse.Namespace) -> int:
             # Check remote access
             try:
                 run_git(
-                    ["ls-remote", "--exit-code", cfg.log_repo_url, "HEAD"],
+                    ["ls-remote", "--exit-code", "--", cfg.log_repo_url, "HEAD"],
                     env={"GIT_TERMINAL_PROMPT": "0"},
                     timeout=15,
                 )
                 safe_print(f"{format_status(True)} Remote access: {cfg.log_repo_url}")
+            except GitError as exc:
+                if exc.returncode == 2:
+                    safe_print(
+                        f"{format_status(True)} Remote access: {cfg.log_repo_url} "
+                        "(empty repository)"
+                    )
+                else:
+                    msg = f"{format_status(False)} Remote access: unreachable"
+                    safe_print(msg, file=sys.stderr)
+                    all_ok = False
             except Exception:
                 safe_print(f"{format_status(False)} Remote access: unreachable", file=sys.stderr)
                 all_ok = False
@@ -438,8 +467,12 @@ def handle_daily(args: argparse.Namespace) -> int:
     ]
     draft_text = "\n".join(draft_header) + "\n" + "\n".join(commits) + "\n"
 
-    git_dir = repo_root / ".git"
-    draft_dir = git_dir if git_dir.is_dir() else repo_root
+    try:
+        git_dir_str = run_git(["rev-parse", "--git-dir"], cwd=repo_root).strip()
+        git_dir = Path(git_dir_str)
+        draft_dir = git_dir if git_dir.is_absolute() else (repo_root / git_dir).resolve()
+    except Exception:
+        draft_dir = repo_root
     draft_file = draft_dir / "ghlog_draft.md"
 
     try:
@@ -468,6 +501,9 @@ def handle_daily(args: argparse.Namespace) -> int:
             safe_print("Aborted. Draft discarded.")
             return ABORTED
 
+    # Sync clone before writing
+    run_git(["pull", "--rebase"], cwd=clone_path, check=False)
+
     # Write log file in clone
     date_file = now.strftime("%Y-%m-%d")
     project_dir = clone_path / project
@@ -483,7 +519,6 @@ def handle_daily(args: argparse.Namespace) -> int:
 
     # Git operations in clone
     try:
-        run_git(["pull", "--rebase"], cwd=clone_path, check=False)
         run_git(["add", "."], cwd=clone_path)
         commit_msg = f"log: {project} {now.strftime('%Y-%m-%d %H:%M:%S')}"
         # Ensure user identity in clone repo if not already configured
@@ -497,9 +532,18 @@ def handle_daily(args: argparse.Namespace) -> int:
             run_git(["config", "user.name", committer_name], cwd=clone_path)
 
         run_git(["commit", "-m", commit_msg], cwd=clone_path)
-        run_git(["push"], cwd=clone_path, check=False)
     except GitError as exc:
         safe_print(f"Error updating log repository: {exc}", file=sys.stderr)
+        return ERROR
+
+    try:
+        run_git(["push"], cwd=clone_path, check=True)
+    except GitError as exc:
+        safe_print(
+            f"Warning: Commit created locally in log clone, but push failed: {exc}\n"
+            "The log commit is preserved locally and will be retried on your next push.",
+            file=sys.stderr,
+        )
         return ERROR
 
     cfg.last_push[project] = now.isoformat()

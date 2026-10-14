@@ -17,7 +17,9 @@ from gh_graph_logger.cli import (
     OK,
     _configure_clone_identity,
     format_status,
+    get_editor,
     main,
+    normalize_url,
     repo_name_from_url,
     slugify,
 )
@@ -737,3 +739,163 @@ def test_daily_collect_alias_works_identically(
     assert code == OK
     captured = capsys.readouterr()
     assert "Successfully logged 1 commit(s) for 'alias-test'" in captured.out
+
+
+def test_init_rejects_ext_protocol(
+    ghlog_home: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ghlog init rejects dangerous custom transport protocols like ext:: and fd::."""
+    root_dir = tmp_path / "root_dir"
+    code = main(
+        [
+            "init",
+            "--url=ext::sh -c evil",
+            "--email",
+            "user@example.com",
+            "--root",
+            str(root_dir),
+            "--yes",
+        ]
+    )
+    assert code == GUARD_FAILED
+    captured = capsys.readouterr()
+    assert "Dangerous or unsupported git protocol" in captured.err
+
+
+def test_check_with_empty_remote_succeeds(
+    ghlog_home: Path,
+    git_repo: Path,
+    bare_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ghlog check reports OK when remote returns exit code 2 (empty bare repository)."""
+    monkeypatch.chdir(git_repo)
+    clone_dir = tmp_path / "log_clone"
+    run_git(["clone", str(bare_remote), str(clone_dir)])
+
+    save_config(
+        Config(
+            log_repo_url=str(bare_remote),
+            clone_path=str(clone_dir),
+            branch="main",
+            github_email="user@example.com",
+        )
+    )
+
+    code = main(["check"])
+    assert code == OK
+    captured = capsys.readouterr()
+    assert "Remote access" in captured.out
+    assert "empty repository" in captured.out
+
+
+def test_init_path_nested_subfolder_fails(
+    ghlog_home: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ghlog init --path rejects a subfolder inside a git repository that is not the root."""
+    clone_dir = tmp_path / "parent_clone"
+    run_git(["clone", str(seeded_remote), str(clone_dir)])
+    nested_dir = clone_dir / "nested_subfolder"
+    nested_dir.mkdir()
+
+    code = main(
+        [
+            "init",
+            "--path",
+            str(nested_dir),
+            "--email",
+            "user@example.com",
+            "--yes",
+        ]
+    )
+    assert code == ERROR
+    captured = capsys.readouterr()
+    assert "is not the root of a git repository" in captured.err
+
+
+def test_daily_push_failure_does_not_update_last_push(
+    ghlog_home: Path,
+    git_repo: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When git push fails, daily returns ERROR and does not advance last_push."""
+    monkeypatch.chdir(git_repo)
+    clone_dir = tmp_path / "log_clone"
+    run_git(["clone", str(seeded_remote), str(clone_dir)])
+
+    save_config(
+        Config(
+            log_repo_url=str(seeded_remote),
+            clone_path=str(clone_dir),
+            branch="main",
+            github_email="test@example.com",
+            last_push={},
+        )
+    )
+
+    # Add commit to work repo
+    feature_file = git_repo / "new_work.txt"
+    feature_file.write_text("work details", encoding="utf-8")
+    run_git(["add", "new_work.txt"], cwd=git_repo)
+    run_git(["commit", "-m", "Work in progress"], cwd=git_repo)
+
+    monkeypatch.setattr("gh_graph_logger.cli.open_editor", lambda p: None)
+
+    # Mock run_git so that push fails with GitError
+    from gh_graph_logger.gitutil import GitError
+    real_run_git = run_git
+
+    def mock_run_git(args: list[str], *a: object, **kw: object) -> str:
+        if args and args[0] == "push":
+            raise GitError("Simulated network timeout during push", command_args=args, returncode=1)
+        return real_run_git(args, *a, **kw)
+
+    monkeypatch.setattr("gh_graph_logger.cli.run_git", mock_run_git)
+
+    code = main(["--since", "2000-01-01", "--yes"])
+    assert code == ERROR
+
+    captured = capsys.readouterr()
+    assert "push failed" in captured.err
+    assert "preserved locally" in captured.err
+
+    # Crucial assertion: last_push was NOT updated
+    cfg = load_config()
+    assert cfg is not None
+    project_slug = slugify(git_repo.name)
+    assert project_slug not in cfg.last_push
+
+
+def test_get_editor_strips_quotes_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """get_editor strips quotes from executable tokens on Windows."""
+    monkeypatch.setenv("GIT_EDITOR", '"C:\\Program Files\\VS Code\\Code.exe" --wait')
+    editor_cmd = get_editor()
+    assert editor_cmd[0] == "C:\\Program Files\\VS Code\\Code.exe"
+    assert editor_cmd[1] == "--wait"
+
+
+def test_normalize_url_ssh_and_https() -> None:
+    """normalize_url standardizes SSH vs HTTPS and backslashes."""
+    ssh_url = "git@github.com:myorg/myrepo.git"
+    https_url = "https://github.com/myorg/myrepo"
+    ssh_scheme = "ssh://git@github.com/myorg/myrepo.git"
+    http_url = "http://github.com/myorg/myrepo.git"
+
+    assert normalize_url(ssh_url) == "https://github.com/myorg/myrepo"
+    assert normalize_url(https_url) == "https://github.com/myorg/myrepo"
+    assert normalize_url(ssh_scheme) == "https://github.com/myorg/myrepo"
+    assert normalize_url(http_url) == "https://github.com/myorg/myrepo"
+
+    # Windows local path with backslashes
+    assert normalize_url(r"C:\Users\repo.git") == "c:/users/repo"
+
