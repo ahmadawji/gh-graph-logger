@@ -215,6 +215,18 @@ Configuration file: C:\Users\admin\.gh-graph-logger\config.json
 
 ---
 
+## 🧠 How It Works Under the Hood
+
+Curious about how `ghlog` handles safe subprocess execution, atomic configuration saves, and security hardening against argument injection?
+
+👉 **Read the full [Architecture & Deep Dive Guide](docs/how_it_works.md)** for:
+- Detailed sequence diagrams of the daily workflow
+- Breakdown of the 3-module architecture (`gitutil.py`, `config.py`, `cli.py`)
+- Real-world production hardening (protocol injection defense, push failure recovery, Windows path handling)
+- Testing architecture and CI design across 57 automated tests
+
+---
+
 ## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
