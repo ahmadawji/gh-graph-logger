@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -877,8 +878,21 @@ def test_daily_push_failure_does_not_update_last_push(
     assert project_slug not in cfg.last_push
 
 
+class _FakeOS:
+    """Proxy around the real `os` module that overrides `name` without mutating global os."""
+
+    def __init__(self, real_os: object, name: str = "nt") -> None:
+        self._real_os = real_os
+        self.name = name
+        self.environ = getattr(real_os, "environ", {})
+
+    def __getattr__(self, item: str) -> object:
+        return getattr(self._real_os, item)
+
+
 def test_get_editor_strips_quotes_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     """get_editor strips quotes from executable tokens on Windows."""
+    monkeypatch.setattr("gh_graph_logger.cli.os", _FakeOS(os, name="nt"))
     monkeypatch.setenv("GIT_EDITOR", '"C:\\Program Files\\VS Code\\Code.exe" --wait')
     editor_cmd = get_editor()
     assert editor_cmd[0] == "C:\\Program Files\\VS Code\\Code.exe"
@@ -892,6 +906,7 @@ def test_get_editor_prefers_vim_over_notepad_when_available(
     monkeypatch.delenv("GIT_EDITOR", raising=False)
     monkeypatch.delenv("VISUAL", raising=False)
     monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setattr("gh_graph_logger.cli.run_git", lambda *args, **kwargs: "")
 
     fake_git_root = tmp_path / "Git"
     fake_git_cmd = fake_git_root / "cmd"
@@ -904,7 +919,7 @@ def test_get_editor_prefers_vim_over_notepad_when_available(
     fake_git_exe.write_text("", encoding="utf-8")
     fake_vim_exe.write_text("", encoding="utf-8")
 
-    monkeypatch.setattr("gh_graph_logger.cli.os.name", "nt")
+    monkeypatch.setattr("gh_graph_logger.cli.os", _FakeOS(os, name="nt"))
     monkeypatch.setattr(
         "gh_graph_logger.cli.shutil.which",
         lambda cmd: str(fake_git_exe) if cmd == "git" else None,
@@ -912,6 +927,22 @@ def test_get_editor_prefers_vim_over_notepad_when_available(
 
     editor_cmd = get_editor()
     assert Path(editor_cmd[0]).name.lower() in ("vim", "vim.exe")
+
+
+def test_get_editor_falls_back_to_notepad_on_windows_when_vim_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_editor falls back to notepad on Windows when vim cannot be resolved."""
+    monkeypatch.delenv("GIT_EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setattr("gh_graph_logger.cli.run_git", lambda *args, **kwargs: "")
+
+    monkeypatch.setattr("gh_graph_logger.cli.os", _FakeOS(os, name="nt"))
+    monkeypatch.setattr("gh_graph_logger.cli.shutil.which", lambda cmd: None)
+
+    editor_cmd = get_editor()
+    assert editor_cmd == ["notepad"]
 
 
 def test_daily_preserves_multiline_commit_messages(
