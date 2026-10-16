@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import urllib.request
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -35,8 +36,10 @@ __all__ = [
     "ERROR",
     "GUARD_FAILED",
     "OK",
+    "REMOTE_PYPROJECT_URL",
     "_configure_clone_identity",
     "build_parser",
+    "check_for_updates",
     "format_status",
     "get_editor",
     "handle_check",
@@ -51,6 +54,10 @@ __all__ = [
     "slugify",
 ]
 
+REMOTE_PYPROJECT_URL: str = (
+    "https://raw.githubusercontent.com/ahmadawji/gh-graph-logger/main/pyproject.toml"
+)
+
 
 def safe_print(message: str = "", file: TextIO | None = None) -> None:
     """Print message handling possible encoding errors on restricted consoles."""
@@ -61,6 +68,58 @@ def safe_print(message: str = "", file: TextIO | None = None) -> None:
         encoding = getattr(target_file, "encoding", "ascii") or "ascii"
         clean = message.encode(encoding, errors="replace").decode(encoding)
         print(clean, file=target_file)
+
+
+_CACHED_UPDATE_VERSION: str | None = None
+_CHECKED_FOR_UPDATES: bool = False
+
+
+def check_for_updates(
+    current_version: str = __version__,
+    remote_url: str = REMOTE_PYPROJECT_URL,
+    timeout: float = 2.0,
+    force: bool = False,
+) -> str | None:
+    """Check if the remote version differs from the local version and advise upgrading.
+
+    Returns the remote version string if an update notification was displayed, otherwise None.
+    """
+    global _CACHED_UPDATE_VERSION, _CHECKED_FOR_UPDATES
+
+    if not force:
+        if _CHECKED_FOR_UPDATES:
+            return _CACHED_UPDATE_VERSION
+        if os.environ.get("GHLOG_NO_UPDATE_CHECK") or os.environ.get("PYTEST_CURRENT_TEST"):
+            return None
+
+    _CHECKED_FOR_UPDATES = True
+    _CACHED_UPDATE_VERSION = None
+
+    try:
+        req = urllib.request.Request(
+            remote_url,
+            headers={"User-Agent": f"gh-graph-logger/{current_version}"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            if response.status == 200:
+                raw_bytes = response.read()
+                content = raw_bytes.decode("utf-8", errors="replace")
+                match = re.search(r'^\s*version\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
+                if match:
+                    remote_version = match.group(1).strip()
+                    if remote_version != current_version:
+                        safe_print(
+                            f"\n[Notice] A different version of gh-graph-logger is available "
+                            f"(local: {current_version}, remote: {remote_version}).\n"
+                            "To upgrade, please run: pipx upgrade gh-graph-logger\n"
+                            "(or: pip install --upgrade git+https://github.com/ahmadawji/gh-graph-logger.git)\n",
+                            file=sys.stderr,
+                        )
+                        _CACHED_UPDATE_VERSION = remote_version
+                        return remote_version
+    except Exception:
+        pass
+    return None
 
 
 def format_status(ok: bool) -> str:
@@ -495,8 +554,21 @@ def handle_daily(args: argparse.Namespace) -> int:
         f"# Commits for {project} - {now_str}",
         "# Lines starting with '#' are comments and will be ignored.",
         "# Delete lines you do not want to log. Save an empty file to abort.",
-        "",
     ]
+    update_ver = check_for_updates()
+    if update_ver:
+        draft_header.extend(
+            [
+                "#",
+                (
+                    f"# [Notice] A different version of gh-graph-logger is available "
+                    f"(local: {__version__}, remote: {update_ver})."
+                ),
+                "# To upgrade, please run: pipx upgrade gh-graph-logger",
+                "# (or: pip install --upgrade git+https://github.com/ahmadawji/gh-graph-logger.git)",
+            ]
+        )
+    draft_header.append("")
     draft_text = "\n".join(draft_header) + "\n" + raw_log + "\n"
 
     try:
@@ -647,6 +719,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the CLI. Returns exit code integer."""
     try:
+        check_for_updates()
         parser = build_parser()
         args = parser.parse_args(argv)
 

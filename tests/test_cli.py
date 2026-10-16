@@ -16,6 +16,7 @@ from gh_graph_logger.cli import (
     GUARD_FAILED,
     OK,
     _configure_clone_identity,
+    check_for_updates,
     format_status,
     get_editor,
     main,
@@ -985,5 +986,124 @@ def test_normalize_url_ssh_and_https() -> None:
 
     # Windows local path with backslashes
     assert normalize_url(r"C:\Users\repo.git") == "c:/users/repo"
+
+
+def test_check_for_updates_differs_instructs_upgrade(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When remote version differs from local, print an upgrade instruction."""
+    fake_remote_toml = b'[project]\nname = "gh-graph-logger"\nversion = "0.3.0"\n'
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.read.return_value = fake_remote_toml
+    mock_resp.__enter__.return_value = mock_resp
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: mock_resp)
+
+    res = check_for_updates(current_version="0.2.0", force=True)
+    assert res == "0.3.0"
+
+    captured = capsys.readouterr()
+    assert "[Notice] A different version of gh-graph-logger is available" in captured.err
+    assert "0.2.0" in captured.err and "0.3.0" in captured.err
+    assert "pipx upgrade gh-graph-logger" in captured.err
+
+
+def test_check_for_updates_matches_silent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When remote version equals local version, do not print any instruction."""
+    fake_remote_toml = b'[project]\nname = "gh-graph-logger"\nversion = "0.2.0"\n'
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.read.return_value = fake_remote_toml
+    mock_resp.__enter__.return_value = mock_resp
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: mock_resp)
+
+    res = check_for_updates(current_version="0.2.0", force=True)
+    assert res is None
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out == ""
+
+
+def test_check_for_updates_network_failure_is_silent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Network or timeout errors fail silently without interrupting the CLI."""
+
+    def mock_urlopen(req, timeout):
+        raise TimeoutError("Connection timed out")
+
+    monkeypatch.setattr("urllib.request.urlopen", mock_urlopen)
+
+    res = check_for_updates(current_version="0.2.0", force=True)
+    assert res is None
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_main_runs_check_for_updates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """main calls check_for_updates on every run."""
+    called: list[bool] = []
+    monkeypatch.setattr(
+        "gh_graph_logger.cli.check_for_updates",
+        lambda: called.append(True) or None,
+    )
+    code = main(["config", "--show"])
+    assert code in (OK, ERROR)
+    assert called == [True]
+
+
+def test_daily_includes_update_notice_in_draft_header(
+    ghlog_home: Path,
+    git_repo: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When an update is available, draft file opened in editor includes the notice."""
+    monkeypatch.chdir(git_repo)
+    clone_dir = tmp_path / "log_clone"
+    run_git(["clone", str(seeded_remote), str(clone_dir)])
+    save_config(
+        Config(
+            log_repo_url=str(seeded_remote),
+            clone_path=str(clone_dir),
+            branch="main",
+            github_email="test@example.com",
+            last_push={},
+        )
+    )
+
+    test_file = git_repo / "update_test.txt"
+    test_file.write_text("content", encoding="utf-8")
+    run_git(["add", "update_test.txt"], cwd=git_repo)
+    run_git(["commit", "-m", "Commit with update check"], cwd=git_repo)
+
+    monkeypatch.setattr(
+        "gh_graph_logger.cli.check_for_updates",
+        lambda: "0.3.0",
+    )
+
+    draft_seen: list[str] = []
+
+    def mock_open_editor(file_path: Path) -> None:
+        content = file_path.read_text(encoding="utf-8")
+        draft_seen.append(content)
+
+    monkeypatch.setattr("gh_graph_logger.cli.open_editor", mock_open_editor)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+
+    code = main(["--since", "2000-01-01"])
+    assert code == OK
+    assert len(draft_seen) == 1
+    assert "# [Notice] A different version of gh-graph-logger is available" in draft_seen[0]
+    assert "0.3.0" in draft_seen[0]
+    assert "# To upgrade, please run: pipx upgrade gh-graph-logger" in draft_seen[0]
+
 
 

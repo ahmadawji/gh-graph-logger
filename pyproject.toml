@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gh-graph-logger"
-version = "0.1.0"
+version = "0.2.0"
 description = "Log your daily commits to your GitHub log repository to keep your contribution graph active."
 readme = "README.md"
 requires-python = ">=3.10"
