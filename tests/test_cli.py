@@ -884,6 +884,93 @@ def test_get_editor_strips_quotes_on_windows(monkeypatch: pytest.MonkeyPatch) ->
     assert editor_cmd[1] == "--wait"
 
 
+def test_get_editor_prefers_vim_over_notepad_when_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """get_editor resolves vim (including Git for Windows usr/bin/vim.exe) before notepad."""
+    monkeypatch.delenv("GIT_EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("EDITOR", raising=False)
+
+    fake_git_root = tmp_path / "Git"
+    fake_git_cmd = fake_git_root / "cmd"
+    fake_git_usr_bin = fake_git_root / "usr" / "bin"
+    fake_git_cmd.mkdir(parents=True)
+    fake_git_usr_bin.mkdir(parents=True)
+
+    fake_git_exe = fake_git_cmd / "git.exe"
+    fake_vim_exe = fake_git_usr_bin / "vim.exe"
+    fake_git_exe.write_text("", encoding="utf-8")
+    fake_vim_exe.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("gh_graph_logger.cli.os.name", "nt")
+    monkeypatch.setattr(
+        "gh_graph_logger.cli.shutil.which",
+        lambda cmd: str(fake_git_exe) if cmd == "git" else None,
+    )
+
+    editor_cmd = get_editor()
+    assert Path(editor_cmd[0]).name.lower() in ("vim", "vim.exe")
+
+
+def test_daily_preserves_multiline_commit_messages(
+    ghlog_home: Path,
+    git_repo: Path,
+    seeded_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Daily flow collects and logs full multi-line commit messages (subject + body)."""
+    monkeypatch.chdir(git_repo)
+    clone_dir = tmp_path / "log_clone"
+    run_git(["clone", str(seeded_remote), str(clone_dir)])
+    save_config(
+        Config(
+            log_repo_url=str(seeded_remote),
+            clone_path=str(clone_dir),
+            branch="main",
+            github_email="test@example.com",
+            last_push={},
+        )
+    )
+
+    feature_file = git_repo / "multiline.txt"
+    feature_file.write_text("multiline content", encoding="utf-8")
+    run_git(["add", "multiline.txt"], cwd=git_repo)
+    full_msg = (
+        "Add multi-line feature\n\n"
+        "Detailed explanation of the change.\n"
+        "- Sub-item one\n"
+        "- Sub-item two"
+    )
+    run_git(["commit", "-m", full_msg], cwd=git_repo)
+
+    def mock_open_editor(file_path: Path) -> None:
+        content = file_path.read_text(encoding="utf-8")
+        assert "Add multi-line feature" in content
+        assert "Detailed explanation of the change." in content
+        assert "- Sub-item one" in content
+
+    monkeypatch.setattr("gh_graph_logger.cli.open_editor", mock_open_editor)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+
+    code = main(["--since", "2000-01-01"])
+    assert code == OK
+
+    captured = capsys.readouterr()
+    assert "Successfully logged 2 commit(s)" in captured.out
+
+    project_slug = slugify(git_repo.name)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    log_file = clone_dir / project_slug / f"{today_str}.md"
+    content = log_file.read_text(encoding="utf-8")
+    assert "Add multi-line feature" in content
+    assert "Detailed explanation of the change." in content
+    assert "- Sub-item one" in content
+    assert "- Sub-item two" in content
+
+
 def test_normalize_url_ssh_and_https() -> None:
     """normalize_url standardizes SSH vs HTTPS and backslashes."""
     ssh_url = "git@github.com:myorg/myrepo.git"
@@ -898,4 +985,5 @@ def test_normalize_url_ssh_and_https() -> None:
 
     # Windows local path with backslashes
     assert normalize_url(r"C:\Users\repo.git") == "c:/users/repo"
+
 

@@ -6,6 +6,7 @@ import argparse
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -130,9 +131,24 @@ def normalize_url(url: str) -> str:
     return cleaned.lower()
 
 
+def _resolve_editor_executable(exe: str) -> str:
+    """Resolve an editor executable name, checking Git's usr/bin on Windows if not on PATH."""
+    if os.name == "nt" and Path(exe).name == exe and shutil.which(exe) is None:
+        git_bin = shutil.which("git")
+        if git_bin:
+            exe_name = exe if exe.lower().endswith(".exe") else f"{exe}.exe"
+            git_root = Path(git_bin).resolve()
+            # Git for Windows puts git.exe in <root>/cmd/ or <root>/bin/
+            for parent in [git_root.parent, git_root.parent.parent]:
+                candidate = parent / "usr" / "bin" / exe_name
+                if candidate.is_file():
+                    return str(candidate)
+    return exe
+
+
 def get_editor() -> list[str]:
-    """Determine the editor command to use."""
-    editor = os.environ.get("GIT_EDITOR") or os.environ.get("EDITOR")
+    """Determine the editor command tokens to use."""
+    editor = os.environ.get("GIT_EDITOR") or os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if not editor:
         try:
             core_editor = run_git(["config", "core.editor"], check=False).strip()
@@ -140,10 +156,27 @@ def get_editor() -> list[str]:
                 editor = core_editor
         except Exception:
             pass
-    if not editor:
-        editor = "notepad" if os.name == "nt" else "vim"
-    tokens = shlex.split(editor, posix=(os.name != "nt"))
-    return [token.strip("\"'") for token in tokens]
+    if editor:
+        tokens = shlex.split(editor, posix=(os.name != "nt"))
+        # In non-posix mode (Windows), shlex keeps enclosing quotes on tokens:
+        # e.g. '"C:\Program Files\VS Code\Code.exe" --wait'
+        #   -> ['"C:\\Program Files\\VS Code\\Code.exe"', '--wait']
+        # We strip the quotes so subprocess.run doesn't treat them as part of the filename:
+        #   -> ['C:\\Program Files\\VS Code\\Code.exe', '--wait']
+        cmd = [token.strip("\"'") for token in tokens]
+        if cmd:
+            cmd[0] = _resolve_editor_executable(cmd[0])
+        return cmd
+    # Unconfigured fallback:
+    if os.name == "nt":
+        resolved_vim = _resolve_editor_executable("vim")
+        # Ensure it's on PATH or an existing absolute path (avoids CWD lookup)
+        if shutil.which(resolved_vim) or (
+            Path(resolved_vim).is_absolute() and Path(resolved_vim).is_file()
+        ):
+            return [resolved_vim]
+        return ["notepad"]
+    return ["vim"]
 
 
 def open_editor(file_path: Path) -> None:
@@ -441,7 +474,7 @@ def handle_daily(args: argparse.Namespace) -> int:
         "--reverse",
         "--no-merges",
         f"--since={since}",
-        "--pretty=format:- %h %s",
+        "--pretty=format:- %h %B",
     ]
     if author:
         git_cmd.append(f"--author={author}")
@@ -452,8 +485,7 @@ def handle_daily(args: argparse.Namespace) -> int:
         safe_print(f"Error querying git log: {exc}", file=sys.stderr)
         return ERROR
 
-    commits = [line.strip() for line in raw_log.splitlines() if line.strip().startswith("- ")]
-    if not commits:
+    if not raw_log:
         safe_print(f"No commits found for '{project}' since '{since}'. Nothing to log.")
         return OK
 
@@ -465,7 +497,7 @@ def handle_daily(args: argparse.Namespace) -> int:
         "# Delete lines you do not want to log. Save an empty file to abort.",
         "",
     ]
-    draft_text = "\n".join(draft_header) + "\n" + "\n".join(commits) + "\n"
+    draft_text = "\n".join(draft_header) + "\n" + raw_log + "\n"
 
     try:
         git_dir_str = run_git(["rev-parse", "--git-dir"], cwd=repo_root).strip()
@@ -483,17 +515,20 @@ def handle_daily(args: argparse.Namespace) -> int:
         if draft_file.exists():
             draft_file.unlink(missing_ok=True)
 
-    kept_commits = [
-        line.strip()
-        for line in edited_text.splitlines()
-        if not line.strip().startswith("#") and line.strip().startswith("- ")
+    kept_lines = [
+        line for line in edited_text.splitlines() if not line.strip().startswith("#")
     ]
+    kept_text = "\n".join(kept_lines).strip()
 
-    if not kept_commits:
+    if not kept_text:
         safe_print("No commits left in draft. Cancelled.")
         return OK
 
-    count = len(kept_commits)
+    count = (
+        sum(1 for line in kept_lines if re.match(r"^-\s+[0-9a-f]{4,}\b", line.strip()))
+        or sum(1 for line in kept_lines if line.strip().startswith("- "))
+        or 1
+    )
     if not getattr(args, "yes", False):
         prompt_msg = f"Push {count} commit(s) for '{project}' to log repo? [y/N]: "
         confirm = input(prompt_msg).strip().lower()
@@ -509,7 +544,7 @@ def handle_daily(args: argparse.Namespace) -> int:
     project_dir = clone_path / project
     project_dir.mkdir(parents=True, exist_ok=True)
     target_file = project_dir / f"{date_file}.md"
-    entry_body = f"## {now_str}\n\n" + "\n".join(kept_commits) + "\n"
+    entry_body = f"## {now_str}\n\n{kept_text}\n"
 
     if target_file.exists():
         existing = target_file.read_text(encoding="utf-8")
